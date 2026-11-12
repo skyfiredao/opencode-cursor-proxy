@@ -1,0 +1,11 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp/opencode/cp-ws","session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","model":"Composer 2.5","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly: PONG"}]},"session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235"}
+{"type":"thinking","subtype":"delta","text":"The","session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","timestamp_ms":1794410366962}
+{"type":"thinking","subtype":"delta","text":" user wants a reply ","session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","timestamp_ms":1794410366967}
+{"type":"thinking","subtype":"delta","text":"of","session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","timestamp_ms":1794410366968}
+{"type":"thinking","subtype":"delta","text":" exactly \"PONG\".","session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","timestamp_ms":1794410366992}
+{"type":"thinking","subtype":"completed","session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","timestamp_ms":1794410366993}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"P"}]},"session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","timestamp_ms":1794410366994}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ONG"}]},"session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","timestamp_ms":1794410366994}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"PONG"}]},"session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235"}
+{"type":"result","subtype":"success","duration_ms":1587,"duration_api_ms":1587,"is_error":false,"result":"PONG","session_id":"6bf18daa-b368-4c28-b11c-bd4f1b52f235","request_id":"45896cb6-a48a-4a83-bca8-e1a687877d35","usage":{"inputTokens":5442,"outputTokens":27,"cacheReadTokens":4160,"cacheWriteTokens":0}}
