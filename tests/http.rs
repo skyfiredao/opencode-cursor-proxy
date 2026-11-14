@@ -89,6 +89,7 @@ async fn request(
             timeout: Duration::from_secs(3),
             trusted_workspace: None,
             load_skills: true,
+            allow_cursor_tools: false,
         },
         token: token.map(str::to_owned),
         models,
@@ -150,6 +151,25 @@ async fn cli_chat_logged(
     directory_header: Option<&str>,
     load_skills: bool,
 ) -> (String, String) {
+    cli_chat_configured(
+        mock,
+        explicit_workspace,
+        directory_header,
+        load_skills,
+        &[],
+        chat(false),
+    )
+    .await
+}
+
+async fn cli_chat_configured(
+    mock: &MockAgent,
+    explicit_workspace: bool,
+    directory_header: Option<&str>,
+    load_skills: bool,
+    extra_args: &[&str],
+    body: Value,
+) -> (String, String) {
     let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("reserve port");
@@ -185,6 +205,7 @@ async fn cli_chat_logged(
     if load_skills {
         command.arg("--load-skills");
     }
+    command.args(extra_args);
     let mut child = command.spawn().expect("start proxy CLI");
     let mut stderr = BufReader::new(child.stderr.take().expect("proxy stderr"));
     let mut socket = tokio::time::timeout(Duration::from_secs(5), async {
@@ -221,7 +242,7 @@ async fn cli_chat_logged(
     })
     .await
     .expect("startup refresh deadline");
-    let body = chat(false).to_string();
+    let body = body.to_string();
     let directory = directory_header
         .map(|path| format!("x-opencode-directory: {path}\r\n"))
         .unwrap_or_default();
@@ -257,6 +278,64 @@ async fn cli_chat_logged(
         .await
         .expect("remaining proxy logs");
     (String::from_utf8(response).expect("HTTP response"), logs)
+}
+
+#[tokio::test]
+async fn cli_cursor_tools_opt_in_allows_native_git_history_only_in_build() {
+    for enabled in [false, true] {
+        for plan in [false, true] {
+            let mock = MockAgent::new("echo 'composer-2.5 - Composer 2.5'");
+            std::fs::write(mock.directory.join("acp-scenario"), "native-approval")
+                .expect("scenario");
+            for args in [
+                vec!["init", "-q"],
+                vec![
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "native-history-marker",
+                ],
+            ] {
+                let output = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&mock.directory)
+                    .output()
+                    .expect("fixture git repository");
+                assert!(output.status.success(), "{output:?}");
+            }
+            let mut body = chat(false);
+            if plan {
+                body["messages"] = json!([
+                    {"role":"user","content":include_str!("fixtures/opencode-plan.txt")},
+                    {"role":"user","content":"Read git history"}
+                ]);
+            }
+            let flags: &[&str] = if enabled {
+                &["--allow-cursor-tools"]
+            } else {
+                &[]
+            };
+            let (response, logs) = cli_chat_configured(&mock, true, None, false, flags, body).await;
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}\n{logs}");
+            let allowed = enabled && !plan;
+            assert!(
+                response.contains(if allowed {
+                    "native-history-marker"
+                } else {
+                    "NATIVE_DENIED"
+                }),
+                "{response}"
+            );
+            assert_eq!(mock.directory.join("native-command-ran").exists(), allowed);
+        }
+    }
 }
 
 #[tokio::test]
@@ -495,6 +574,7 @@ async fn workspace_agents_are_reloaded_for_each_new_conversation() {
                 timeout: Duration::from_secs(3),
                 trusted_workspace: None,
                 load_skills: true,
+                allow_cursor_tools: false,
             },
             request,
             mock.directory.clone(),
@@ -723,7 +803,7 @@ async fn reported_usage_is_returned_once_in_json_and_sse_including_zero() {
 }
 
 #[tokio::test]
-async fn sse_uses_the_same_plan_catalog_and_rejects_forbidden_named_choices() {
+async fn sse_preserves_host_tools_and_named_choices_in_plan_and_build() {
     for plan in [false, true] {
         let mock = MockAgent::new("exit 1");
         std::fs::write(mock.directory.join("acp-scenario"), "policy-catalog").expect("scenario");
@@ -755,54 +835,91 @@ async fn sse_uses_the_same_plan_catalog_and_rejects_forbidden_named_choices() {
             .collect();
         assert_eq!(
             serde_json::from_str::<Value>(&text).expect("catalog"),
-            if plan {
-                json!(["read"])
-            } else {
-                json!(["read", "write"])
-            }
+            json!(["read", "write"])
         );
         assert_eq!(response.matches("[DONE]").count(), 1);
-        if plan {
-            body["tool_choice"] = json!({"type":"function","function":{"name":"write"}});
-            let response = request(&mock, "/v1/chat/completions", Some(body), None, None).await;
-            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
-        }
+        body["tool_choice"] = json!({"type":"function","function":{"name":"write"}});
+        body["messages"]
+            .as_array_mut()
+            .expect("messages")
+            .push(json!({"role":"user","content":"CALL_WRITE"}));
+        let response = request(&mock, "/v1/chat/completions", Some(body), None, None).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let chunks: Vec<Value> = response
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .map(|data| serde_json::from_str(data).expect("chunk"))
+            .collect();
+        assert!(
+            !chunks.iter().any(|chunk| chunk.get("error").is_some()),
+            "{response}"
+        );
+        assert!(
+            chunks.iter().any(
+                |chunk| chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"]
+                    == "write"
+            ),
+            "{response}"
+        );
+        assert_eq!(response.matches("[DONE]").count(), 1);
     }
 }
 
 #[tokio::test]
-async fn http_admission_exposes_the_effective_plan_catalog_and_preserves_build() {
-    for (plan, choice, names, expected, call_read) in [
+async fn http_admission_delegates_plan_and_build_catalogs_and_preserves_tool_choices() {
+    for (plan, choice, names, expected, call_tool) in [
         (
             true,
             json!("auto"),
             vec!["read", "write"],
-            vec!["read"],
-            false,
+            vec!["read", "write"],
+            None,
         ),
         (
             false,
             json!("auto"),
             vec!["read", "write"],
             vec!["read", "write"],
-            false,
+            None,
         ),
         (
             true,
             json!({"type":"function","function":{"name":"read"}}),
             vec!["read", "write"],
             vec!["read"],
-            true,
+            Some("read"),
         ),
-        (true, json!("none"), vec!["read", "write"], vec![], false),
-        (false, json!("none"), vec!["read", "write"], vec![], false),
-        (true, json!("auto"), vec!["write"], vec![], false),
+        (true, json!("none"), vec!["read", "write"], vec![], None),
+        (false, json!("none"), vec!["read", "write"], vec![], None),
+        (true, json!("auto"), vec!["write"], vec!["write"], None),
         (
             true,
             json!("required"),
             vec!["read", "write"],
-            vec!["read"],
+            vec!["read", "write"],
+            Some("read"),
+        ),
+        (
             true,
+            json!({"type":"function","function":{"name":"write"}}),
+            vec!["read", "write"],
+            vec!["write"],
+            Some("write"),
+        ),
+        (
+            true,
+            json!({"type":"function","function":{"name":"shell"}}),
+            vec!["read", "shell"],
+            vec!["shell"],
+            Some("shell"),
+        ),
+        (
+            true,
+            json!("required"),
+            vec!["bash"],
+            vec!["bash"],
+            Some("bash"),
         ),
     ] {
         let mock = MockAgent::new("exit 1");
@@ -810,7 +927,7 @@ async fn http_admission_exposes_the_effective_plan_catalog_and_preserves_build()
         let mut body = chat(false);
         body["messages"] = json!([
             {"role":"user","content":if plan { include_str!("fixtures/opencode-plan.txt") } else { "hello" }},
-            {"role":"user","content":if call_read { "CALL_READ" } else { "List tools" }}
+            {"role":"user","content":call_tool.map(|name| format!("CALL_TOOL={name}")).unwrap_or_else(|| "List tools".to_owned())}
         ]);
         body["tools"] = json!(
             names
@@ -832,11 +949,11 @@ async fn http_admission_exposes_the_effective_plan_catalog_and_preserves_build()
         )
         .expect("names");
         assert_eq!(listed, expected);
-        if call_read {
+        if let Some(name) = call_tool {
             assert_eq!(reply["choices"][0]["finish_reason"], "tool_calls");
             assert_eq!(
                 reply["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
-                "read"
+                name
             );
         }
     }
@@ -857,13 +974,16 @@ async fn http_admission_exposes_the_effective_plan_catalog_and_preserves_build()
 }
 
 #[tokio::test]
-async fn plan_rejects_forbidden_tool_choices_before_starting_cursor() {
+async fn undeclared_tool_choices_are_rejected_before_starting_cursor() {
     for (tools, choice) in [
         (
             vec!["read", "write"],
-            json!({"type":"function","function":{"name":"write"}}),
+            json!({"type":"function","function":{"name":"missing"}}),
         ),
-        (vec!["write"], json!("required")),
+        (
+            vec!["write"],
+            json!({"type":"function","function":{"name":"shell"}}),
+        ),
         (
             vec!["read"],
             json!({"type":"function","function":{"name":"missing"}}),

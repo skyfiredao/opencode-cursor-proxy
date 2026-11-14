@@ -40,6 +40,7 @@ impl Fixture {
             timeout: Duration::from_secs(3),
             trusted_workspace: None,
             load_skills: false,
+            allow_cursor_tools: false,
         }
     }
 }
@@ -222,7 +223,94 @@ async fn switching_build_plan_build_uses_independent_sessions() {
 }
 
 #[tokio::test]
-async fn concurrent_plan_and_build_tools_keep_their_own_policy_and_result() {
+async fn plan_commands_reach_the_host_and_preserve_git_results_or_permission_denials() {
+    for tool in ["shell", "bash"] {
+        for allowed in [true, false] {
+            let fixture = Fixture::new("plan-host-command");
+            for args in [
+                vec!["init", "-q"],
+                vec![
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "plan-history-marker",
+                ],
+            ] {
+                let output = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&fixture.0)
+                    .output()
+                    .expect("fixture git repository");
+                assert!(output.status.success(), "{output:?}");
+            }
+            let store = Arc::new(SessionStore::default());
+            let (_shutdown, receiver) = watch::channel(false);
+            let mut config = fixture.config();
+            config.allow_cursor_tools = true;
+            let mut body = json!({"model":"composer-2.5","messages":[
+                {"role":"user","content":include_str!("fixtures/opencode-plan.txt")},
+                {"role":"user","content":"Read git history through OpenCode's command tool"}
+            ],"tools":[{"type":"function","function":{"name":tool,"parameters":{
+                "type":"object","properties":{"command":{"type":"string"}},"required":["command"]
+            }}}]});
+            let (text, calls) = collect(store.clone().start(
+                config.clone(),
+                serde_json::from_value(body.clone()).expect("request"),
+                fixture.0.clone(),
+                receiver.clone(),
+                "plan-command".into(),
+            ))
+            .await;
+            assert!(text.is_empty());
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].function.name, tool);
+            assert_eq!(
+                serde_json::from_str::<Value>(&calls[0].function.arguments)
+                    .expect("command arguments"),
+                json!({"command":"git log -1 --format=%s"})
+            );
+            let result = if allowed {
+                let output = std::process::Command::new("git")
+                    .args(["log", "-1", "--format=%s"])
+                    .current_dir(&fixture.0)
+                    .output()
+                    .expect("host reads git history");
+                assert!(output.status.success(), "{output:?}");
+                assert_eq!(output.stdout, b"plan-history-marker\n");
+                String::from_utf8(output.stdout).expect("git output")
+            } else {
+                "Permission denied by OpenCode".to_owned()
+            };
+            body["messages"].as_array_mut().expect("history").extend([
+                json!({"role":"assistant","content":null,"tool_calls":calls}),
+                json!({"role":"tool","tool_call_id":calls[0].id,"content":result}),
+            ]);
+            let (text, calls) = collect(store.start(
+                config,
+                serde_json::from_value(body).expect("tool result request"),
+                fixture.0.clone(),
+                receiver,
+                "plan-command-result".into(),
+            ))
+            .await;
+            assert_eq!(text, result);
+            assert!(
+                calls.is_empty(),
+                "the proxy must not replay a rejected host command"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_plan_and_build_tools_keep_their_own_mode_and_result() {
     let fixture = Fixture::new("policy-catalog");
     let store = Arc::new(SessionStore::default());
     let (shutdown, receiver) = watch::channel(false);
@@ -255,11 +343,7 @@ async fn concurrent_plan_and_build_tools_keep_their_own_policy_and_result() {
         );
         assert_eq!(
             serde_json::from_str::<Value>(&text).expect("catalog"),
-            if index == 0 {
-                json!(["read", "write"])
-            } else {
-                json!(["read"])
-            }
+            json!(["read", "write"])
         );
         let marker = if index == 0 {
             "BUILD_RESULT"
@@ -437,6 +521,7 @@ async fn empty_recovery_never_replays_tools_failures_or_more_than_one_prompt() {
         ("repair-error", 1),
         ("repair-cancelled", 1),
         ("repair-second-native", 2),
+        ("repair-second-permission", 2),
         ("repair-mcp-invalid", 1),
         ("repair-second-mcp-invalid", 2),
     ] {
@@ -446,8 +531,10 @@ async fn empty_recovery_never_replays_tools_failures_or_more_than_one_prompt() {
         let body = json!({"model":"composer-2.5","messages":[{"role":"user","content":"original"}],"tools":[{"type":"function","function":{
             "name":"host_echo","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}
         }}]});
+        let mut config = fixture.config();
+        config.allow_cursor_tools = true;
         let mut updates = store.start(
-            fixture.config(),
+            config,
             serde_json::from_value(body).expect("request"),
             fixture.0.clone(),
             receiver,
@@ -467,6 +554,14 @@ async fn empty_recovery_never_replays_tools_failures_or_more_than_one_prompt() {
         let prompts =
             std::fs::read_to_string(fixture.0.join("repair-prompts.ndjson")).expect("prompt trace");
         assert_eq!(prompts.lines().count(), expected_prompts, "{scenario}");
+        if scenario == "repair-second-permission" {
+            let result: Value = serde_json::from_str(
+                &std::fs::read_to_string(fixture.0.join("recovery-permission-result"))
+                    .expect("recovery permission response"),
+            )
+            .expect("permission JSON");
+            assert_eq!(result["outcome"]["optionId"], "deny");
+        }
     }
 }
 

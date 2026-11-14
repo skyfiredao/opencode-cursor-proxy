@@ -1,6 +1,36 @@
 use std::process::Command;
 
 #[test]
+fn native_tool_authorization_is_an_explicit_cli_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cursor-proxy"))
+        .arg("--help")
+        .output()
+        .expect("CLI help");
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(help.contains("--allow-cursor-tools"), "{help}");
+    assert!(!help.contains("--allow-native-tools"), "{help}");
+    assert!(help.contains("bypass OpenCode permissions"), "{help}");
+    let output = Command::new(env!("CARGO_BIN_EXE_cursor-proxy"))
+        .args(["--allow-cursor-tools", "--timeout-secs", "0"])
+        .output()
+        .expect("CLI flag");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--timeout-secs must be greater than zero")
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_cursor-proxy"))
+        .args(["--allow-native-tools", "--timeout-secs", "0"])
+        .output()
+        .expect("rejected alternate flag");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("unexpected argument '--allow-native-tools'")
+    );
+}
+
+#[test]
 fn removed_session_resume_is_not_advertised_or_accepted() {
     for args in [["-h"], ["--help"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_cursor-proxy"))

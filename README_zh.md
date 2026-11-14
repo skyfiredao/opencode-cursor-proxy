@@ -97,6 +97,7 @@ Windows 使用 `.\cursor-proxy.exe --help`。
 | `--cursor-agent` | Cursor CLI 路径 | `cursor-agent` |
 | `--timeout-secs` | 回复超时秒数 | `300` |
 | `--load-skills` | 加载 `AGENTS.md` 中的项目指令 | 关闭 |
+| `--allow-cursor-tools` | 在 Build 模式下自动批准 Cursor 原生工具 | 关闭 |
 
 代理使用 `--workspace` 指定的项目目录。切换项目时，停止代理，再用新目录启动。
 
@@ -118,11 +119,13 @@ Windows 使用 `.\cursor-proxy.exe --help`。
 
 OpenCode 执行通过 MCP 桥转发的工具调用，结果回到原 ACP 对话后继续回复。Cursor 原生工具仍可能直接修改文件或执行命令，OpenCode 权限不覆盖这些操作。
 
+代理默认拒绝 Cursor 原生工具的审批请求。启动时添加 `--allow-cursor-tools`，可在 Build 模式下自动批准当前 ACP 会话的原生工具请求。这会允许原生文件修改和命令执行绕过 OpenCode 权限检查，并非只允许只读 Git 命令。该选项在 Plan 模式和空回复恢复期间不授予原生工具权限，也不改变 MCP 桥接工具权限或批准其他 Cursor 阻塞交互。
+
 工具结果续接无需额外参数。最终回复完成后，代理关闭该 ACP 对话；下一轮用户输入根据 OpenCode 提供的历史建立新对话。
 
 代理根据 OpenCode 的模式提醒同步 Plan / Build；其他版本或自定义 agent 的兼容性需另行验证。
 
-Plan 模式下，MCP 工具桥只允许 `read`、`glob`、`grep` 和 `question`，也不会为其他桥接工具授予 ACP 执行许可。写入计划目录、命令执行、子任务和自定义工具均不支持；Build 不受此限制。Cursor 原生运行时不受代理沙箱保护。
+Plan 和 Build 模式均按 `tool_choice` 转发声明的工具，由 OpenCode 控制执行权限。OpenCode 允许时，Plan 可通过桥接命令工具查看 Git 历史，也可写入计划文件。代理仍选择 Cursor 的 Plan 模式，并拒绝该模式下的原生工具审批，即使开启 `--allow-cursor-tools` 也不例外。Cursor 原生运行时不受代理沙箱保护。
 
 ## 空回复恢复
 

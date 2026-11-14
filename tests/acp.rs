@@ -27,6 +27,7 @@ impl Fixture {
             timeout: Duration::from_secs(3),
             trusted_workspace: None,
             load_skills: false,
+            allow_cursor_tools: false,
         }
     }
 }
@@ -37,6 +38,150 @@ impl Drop for Fixture {
             eprintln!("ACP fixture cleanup: {error}");
         }
     }
+}
+
+#[tokio::test]
+async fn cursor_tools_require_opt_in_build_mode_and_the_current_session() {
+    for enabled in [false, true] {
+        let fixture = Fixture::new(if enabled {
+            "native-enabled"
+        } else {
+            "native-disabled"
+        });
+        let mut config = fixture.config();
+        config.allow_cursor_tools = enabled;
+        let connection = Connection::open(&config, &fixture.0, "composer-2.5")
+            .await
+            .expect("connection");
+        let created = connection
+            .call("session/new", json!({"cwd":fixture.0,"mcpServers":[]}))
+            .await
+            .expect("session");
+        let session = created["sessionId"].as_str().expect("session ID");
+        let result = connection
+            .call("probe/permission", json!({"sessionId":session}))
+            .await
+            .expect("permission before policy setup");
+        assert_eq!(result["outcome"]["optionId"], "deny-7");
+        for mode in [
+            ExecutionMode::Build,
+            ExecutionMode::Plan,
+            ExecutionMode::Build,
+        ] {
+            connection.allow_tools(session, "bridge", [], mode).await;
+            for target in [session, "foreign-session", ""] {
+                let result = connection.call("probe/permission", json!({
+                    "sessionId":target,"toolCall":{"toolCallId":"native-command","kind":"execute"}
+                })).await.expect("permission response");
+                assert_eq!(
+                    result["outcome"]["optionId"],
+                    if enabled && mode == ExecutionMode::Build && target == session {
+                        "allow-7"
+                    } else {
+                        "deny-7"
+                    },
+                    "enabled={enabled}, mode={mode:?}, target={target}"
+                );
+            }
+        }
+        let result = connection
+            .call(
+                "probe/permission",
+                json!({
+                    "sessionId":session,"toolCall":{"toolCallId":"native-command"},
+                    "options":[{"optionId":"always","kind":"allow_always"}]
+                }),
+            )
+            .await
+            .expect("no allow-once option");
+        assert_eq!(result["outcome"]["outcome"], "cancelled");
+        connection.revoke_tools().await;
+        let result = connection
+            .call("probe/permission", json!({"sessionId":session}))
+            .await
+            .expect("permission after revocation");
+        assert_eq!(result["outcome"]["optionId"], "deny-7");
+        connection
+            .allow_tools(session, "bridge", [], ExecutionMode::Build)
+            .await;
+        for tool_call in [
+            json!({}),
+            json!({"toolCallId":""}),
+            json!({"toolCallId":"x".repeat(257)}),
+        ] {
+            let result = connection
+                .call(
+                    "probe/permission",
+                    json!({"sessionId":session,"toolCall":tool_call}),
+                )
+                .await
+                .expect("invalid tool ID");
+            assert_eq!(result["outcome"]["optionId"], "deny-7");
+        }
+        connection.cancel(session).expect("cancel");
+        let result = connection
+            .call("probe/permission", json!({"sessionId":session}))
+            .await
+            .expect("permission after cancellation");
+        assert_eq!(result["outcome"]["outcome"], "cancelled");
+        connection.close().await;
+    }
+}
+
+#[tokio::test]
+async fn cursor_tools_opt_in_preserves_mcp_correlation_and_single_use() {
+    let fixture = Fixture::new("native-mcp-boundaries");
+    let mut config = fixture.config();
+    config.allow_cursor_tools = true;
+    let mut connection = Connection::open(&config, &fixture.0, "composer-2.5")
+        .await
+        .expect("connection");
+    let created = connection
+        .call("session/new", json!({"cwd":fixture.0,"mcpServers":[]}))
+        .await
+        .expect("session");
+    let session = created["sessionId"].as_str().expect("session ID");
+    connection
+        .allow_tools(
+            session,
+            "bridge",
+            ["probe".to_owned()],
+            ExecutionMode::Build,
+        )
+        .await;
+    for (server, tool, expected) in [
+        ("bridge", "probe", "allow-7"),
+        ("other", "probe", "deny-7"),
+        ("bridge", "forbidden", "deny-7"),
+    ] {
+        let id = format!("{server}-{tool}");
+        connection
+            .call(
+                "probe/grant",
+                json!({"server":server,"toolName":tool,"toolId":id}),
+            )
+            .await
+            .expect("notification");
+        assert!(matches!(
+            connection.next().await,
+            Some(Event::Notification(_))
+        ));
+        for expected in [expected, "deny-7"] {
+            let result = connection
+                .call(
+                    "probe/permission",
+                    json!({"sessionId":session,"toolCall":{"toolCallId":id}}),
+                )
+                .await
+                .expect("MCP permission");
+            assert_eq!(result["outcome"]["optionId"], expected, "{id}");
+        }
+    }
+    let result = connection.call("probe/permission", json!({
+        "sessionId":session,"toolCall":{"toolCallId":"unannounced-mcp","rawInput":{"providerIdentifier":"bridge","toolName":"probe"}}
+    })).await.expect("uncorrelated MCP permission");
+    assert_eq!(result["outcome"]["optionId"], "deny-7");
+    connection.close().await;
 }
 
 #[tokio::test]
@@ -286,7 +431,7 @@ async fn dropping_a_connection_kills_a_peer_that_stops_reading_stdin() {
 }
 
 #[tokio::test]
-async fn plan_permissions_filter_tools_and_do_not_reuse_build_grants() {
+async fn bridge_permissions_delegate_all_declared_tools_and_do_not_reuse_mode_grants() {
     let fixture = Fixture::new("plan-approvals");
     let mut connection = Connection::open(&fixture.config(), &fixture.0, "composer-2.5")
         .await
@@ -316,7 +461,7 @@ async fn plan_permissions_filter_tools_and_do_not_reuse_build_grants() {
         ExecutionMode::Plan,
         ExecutionMode::Build,
     ] {
-        for (index, name) in names.iter().enumerate() {
+        for name in names {
             connection
                 .allow_tools(
                     session,
@@ -337,15 +482,7 @@ async fn plan_permissions_filter_tools_and_do_not_reuse_build_grants() {
                 .call("probe/permission", json!({"sessionId":session}))
                 .await
                 .expect("decision");
-            assert_eq!(
-                outcome["outcome"]["optionId"],
-                if mode == ExecutionMode::Build || index < 4 {
-                    "allow-7"
-                } else {
-                    "deny-7"
-                },
-                "{mode:?} {name}"
-            );
+            assert_eq!(outcome["outcome"]["optionId"], "allow-7", "{mode:?} {name}");
             let repeated = connection
                 .call("probe/permission", json!({"sessionId":session}))
                 .await

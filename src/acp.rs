@@ -41,6 +41,9 @@ struct Permissions {
     server: String,
     tools: HashSet<String>,
     calls: HashMap<(String, String), String>,
+    // Consumed MCP grants must not fall through to native-tool approval.
+    mcp_calls: HashSet<(String, String)>,
+    allow_cursor_tools: bool,
 }
 
 pub struct Connection {
@@ -54,6 +57,7 @@ pub struct Connection {
     approval_cancelled: Arc<AtomicBool>,
     tool_activity: Arc<AtomicUsize>,
     timeout: Duration,
+    allow_cursor_tools: bool,
     pub capabilities: Value,
 }
 
@@ -187,27 +191,33 @@ impl Connection {
                         if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) {
                             notification_activity.fetch_add(1, Ordering::Relaxed);
                         }
-                        if let (Some(id), Some(server), Some(tool)) = (
+                        if let (Some(id), Some(server)) = (
                             update["toolCallId"].as_str(), update["rawInput"]["providerIdentifier"].as_str(),
-                            update["rawInput"]["toolName"].as_str(),
                         ) {
                             let mut state = permission_updates.lock().await;
-                            if params["sessionId"].as_str() == Some(state.session.as_str()) && state.server == server && state.tools.contains(tool) {
+                            if params["sessionId"].as_str() == Some(state.session.as_str()) {
                                 let key = (state.session.clone(), id.to_owned());
-                                if id.len() > 256 || (state.calls.len() >= 1024 && !state.calls.contains_key(&key)) {
+                                if id.len() > 256 || (state.mcp_calls.len() >= 1024 && !state.mcp_calls.contains(&key)) {
                                     state.calls.clear();
                                     overflow.cancel();
                                     return Err(agent_client_protocol::Error::internal_error().data("ACP pending permission limit exceeded"));
                                 }
-                                state.calls.insert(key, tool.to_owned());
-                            }
-                        }
-                        if update["status"] == "completed" || update["status"] == "failed" {
-                            if let Some(id) = update["toolCallId"].as_str() {
-                                if let Some(session) = params["sessionId"].as_str() {
-                                    permission_updates.lock().await.calls.remove(&(session.to_owned(), id.to_owned()));
+                                state.mcp_calls.insert(key.clone());
+                                if state.server == server
+                                    && let Some(tool) = update["rawInput"]["toolName"].as_str().filter(|tool| state.tools.contains(*tool))
+                                {
+                                    state.calls.insert(key, tool.to_owned());
                                 }
                             }
+                        }
+                        if (update["status"] == "completed" || update["status"] == "failed")
+                            && let Some(id) = update["toolCallId"].as_str()
+                            && let Some(session) = params["sessionId"].as_str()
+                        {
+                            let mut state = permission_updates.lock().await;
+                            let key = (session.to_owned(), id.to_owned());
+                            state.calls.remove(&key);
+                            state.mcp_calls.remove(&key);
                         }
                         let size = serde_json::to_vec(&params)?.len();
                         let prior = pending_bytes.fetch_add(size, Ordering::Relaxed);
@@ -235,11 +245,19 @@ impl Connection {
                                 return responder.respond(json!({"outcome":{"outcome":"cancelled"}}));
                             }
                             let mut state = request_permissions.lock().await;
+                            if request_cancelled.load(Ordering::Relaxed) {
+                                return responder.respond(json!({"outcome":{"outcome":"cancelled"}}));
+                            }
                             let session = state.session.clone();
-                            let permitted = if params["sessionId"].as_str() == Some(state.session.as_str()) {
+                            let permitted = if !session.is_empty() && params["sessionId"].as_str() == Some(session.as_str()) {
                                 params["toolCall"]["toolCallId"].as_str()
-                                    .and_then(|id| state.calls.remove(&(session, id.to_owned())))
-                                    .is_some_and(|tool| state.tools.contains(&tool))
+                                    .filter(|id| !id.is_empty() && id.len() <= 256)
+                                    .is_some_and(|id| {
+                                        let key = (session, id.to_owned());
+                                        let bridged = state.calls.remove(&key).is_some_and(|tool| state.tools.contains(&tool));
+                                        bridged || (state.allow_cursor_tools && !state.mcp_calls.contains(&key)
+                                            && params["toolCall"]["rawInput"].get("providerIdentifier").is_none())
+                                    })
                             } else { false };
                             let kind = if permitted { "allow_once" } else { "reject_once" };
                             let option = params["options"].as_array().and_then(|options| options.iter().find(|option| option["kind"] == kind));
@@ -316,6 +334,7 @@ impl Connection {
             worker: Some(worker),
             permissions,
             approval_cancelled,
+            allow_cursor_tools: config.allow_cursor_tools,
             tool_activity,
             timeout: config.timeout,
             capabilities: Value::Null,
@@ -431,13 +450,21 @@ impl Connection {
     ) {
         let mut state = self.permissions.lock().await;
         state.calls.clear();
+        if state.session != session {
+            state.mcp_calls.clear();
+        }
         state.session = session.to_owned();
         state.server = server.to_owned();
-        state.tools = tools
-            .into_iter()
-            .filter(|name| mode.allows_tool(name))
-            .collect();
+        state.tools = tools.into_iter().collect();
+        state.allow_cursor_tools = self.allow_cursor_tools && mode == ExecutionMode::Build;
         self.approval_cancelled.store(false, Ordering::Relaxed);
+    }
+
+    pub async fn revoke_tools(&self) {
+        let mut state = self.permissions.lock().await;
+        state.calls.clear();
+        state.tools.clear();
+        state.allow_cursor_tools = false;
     }
 
     pub async fn next(&mut self) -> Option<Event> {

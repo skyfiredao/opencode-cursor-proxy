@@ -160,7 +160,12 @@ def host_turn(request_id):
             results = list(workers.map(lambda text: request("tools/call", {"name":name,"arguments":{"text":text}}), ["hello-1", "hello-2"]))
         text = "|".join(result["result"]["content"][0]["text"] for result in results)
     else:
-        result = request("tools/call", {"name":name,"arguments":{"text":"hello"}})
+        arguments = {"text":"hello"}
+        if args.scenario == "plan-host-command":
+            if mode != "plan":
+                raise RuntimeError("bridged command did not use Cursor Plan mode")
+            arguments = {"command":"git log -1 --format=%s"}
+        result = request("tools/call", {"name":name,"arguments":arguments})
         text = result["result"]["content"][0]["text"]
     update(session, "tool_call_update", toolCallId="mcp-status", status="completed")
     update(session, "agent_message_chunk", content={"type":"text","text":text})
@@ -181,6 +186,8 @@ def policy_catalog_turn(request_id, prompt):
         names = [tool["name"] for tool in mcp_request("tools/list", {})["result"]["tools"]]
     update(session, "agent_message_chunk", content={"type":"text","text":json.dumps(names)})
     tool = "read" if "CALL_READ" in prompt else "write" if "CALL_WRITE" in prompt else None
+    if "CALL_TOOL=" in prompt:
+        tool = prompt.split("CALL_TOOL=", 1)[1].split()[0]
     if tool is not None:
         result = mcp_request("tools/call", {"name":tool,"arguments":{}})
         if "result" in result:
@@ -241,6 +248,12 @@ for line in sys.stdin:
     elif method == "session/prompt":
         pending = request_id
         prompt_count += 1
+        if args.scenario == "native-approval":
+            send({"id":904,"method":"session/request_permission","params":{
+                "sessionId":session,"toolCall":{"toolCallId":"native-git","kind":"execute","title":"git log -1 --format=%s"},
+                "options":[{"optionId":"deny-native","kind":"reject_once"},{"optionId":"allow-native","kind":"allow_once"}],
+            }})
+            continue
         if args.scenario.startswith("usage-store"):
             if baseline_lock is not None:
                 baseline_lock.rollback()
@@ -319,6 +332,11 @@ for line in sys.stdin:
                     send({"id":request_id,"result":{"stopReason":"end_turn"}})
                 else:
                     send({"id":request_id,"result":{"stopReason":"cancelled" if args.scenario == "repair-cancelled" else "end_turn"}})
+            elif args.scenario == "repair-second-permission":
+                send({"id":905,"method":"session/request_permission","params":{
+                    "sessionId":session,"toolCall":{"toolCallId":"recovery-native","kind":"execute"},
+                    "options":[{"optionId":"deny","kind":"reject_once"},{"optionId":"allow","kind":"allow_once"}],
+                }})
             elif args.scenario == "repair-second-native":
                 update(session, "tool_call_update", toolCallId="unexpected-native", status="completed")
                 send({"id":request_id,"result":{"stopReason":"end_turn"}})
@@ -343,7 +361,7 @@ for line in sys.stdin:
             update(session, "agent_message_chunk", content={"type":"text","text":session + ":" + memory})
             send({"id":request_id,"result":{"stopReason":"end_turn"}})
             continue
-        if args.scenario in {"host-tool", "parallel-tools", "ordered-tools", "late-tool-text", "blocked-barrier", "usage-host-tool"}:
+        if args.scenario in {"host-tool", "parallel-tools", "ordered-tools", "late-tool-text", "blocked-barrier", "usage-host-tool", "plan-host-command"}:
             threading.Thread(target=run_host_turn, args=(request_id,), daemon=True).start()
             continue
         if args.scenario == "cancel":
@@ -385,14 +403,24 @@ for line in sys.stdin:
         if args.scenario == "late-tool-text" and mode_sets == 2:
             update(session, "agent_message_chunk", content={"type":"text","text":"LATE_PRE_TOOL"})
     elif method == "probe/grant":
-        update(session, "tool_call_update", toolCallId=params.get("toolId", "grant-1"), rawInput={"providerIdentifier":"bridge","toolName":params.get("toolName", "probe"),"args":{}})
+        update(session, "tool_call_update", toolCallId=params.get("toolId", "grant-1"), rawInput={"providerIdentifier":params.get("server", "bridge"),"toolName":params.get("toolName", "probe"),"args":{}})
         send({"id":request_id,"result":{}})
     elif method == "probe/permission":
         pending = request_id
         send({"id":902,"method":"session/request_permission","params":{
-            "sessionId":params.get("sessionId",session),"toolCall":{"toolCallId":"grant-1"},
-            "options":[{"optionId":"deny-7","kind":"reject_once"},{"optionId":"allow-7","kind":"allow_once"}],
+            "sessionId":params.get("sessionId",session),"toolCall":params.get("toolCall", {"toolCallId":"grant-1"}),
+            "options":params.get("options", [{"optionId":"deny-7","kind":"reject_once"},{"optionId":"allow-7","kind":"allow_once"}]),
         }})
+    elif request_id == 905 and "result" in message:
+        Path("recovery-permission-result").write_text(json.dumps(message["result"]))
+        send({"id":pending,"result":{"stopReason":"end_turn"}})
+    elif request_id == 904 and "result" in message:
+        text = "NATIVE_DENIED"
+        if message["result"].get("outcome", {}).get("optionId") == "allow-native":
+            text = subprocess.check_output(["git", "log", "-1", "--format=%s"], text=True).strip()
+            Path("native-command-ran").touch()
+        update(session, "agent_message_chunk", content={"type":"text","text":text})
+        send({"id":pending,"result":{"stopReason":"end_turn"}})
     elif request_id == 901 and "result" in message:
         published = Path("permission-result.pending")
         published.write_text(json.dumps(message["result"]))

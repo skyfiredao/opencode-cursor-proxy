@@ -97,6 +97,7 @@ On Windows, use `.\cursor-proxy.exe --help`.
 | `--cursor-agent` | Cursor CLI path | `cursor-agent` |
 | `--timeout-secs` | Reply timeout in seconds | `300` |
 | `--load-skills` | Load project instructions from `AGENTS.md` | Off |
+| `--allow-cursor-tools` | Automatically approve Cursor native tools in Build mode | Off |
 
 The proxy uses the project directory selected by `--workspace`. To switch projects, stop the proxy and start it with the new directory.
 
@@ -118,11 +119,13 @@ The proxy uses the project directory selected by `--workspace`. To switch projec
 
 OpenCode executes tools forwarded through the MCP bridge. Results return to the original ACP conversation before the reply continues. Cursor's native tools may still modify files or run commands directly; OpenCode permissions do not cover those operations.
 
+By default, the proxy rejects approval requests for Cursor native tools. Start with `--allow-cursor-tools` to approve them automatically in Build mode for the current ACP session. This permits native file changes and command execution without OpenCode permission checks, not just read-only Git commands. The option does not grant native approvals in Plan mode or during empty-reply recovery. It does not change MCP bridge permissions or approve other blocking Cursor interactions.
+
 Tool-result continuation needs no extra option. After a final reply, the proxy closes the ACP conversation; the next user turn starts a new conversation with OpenCode's supplied history.
 
 The proxy synchronizes Plan / Build using OpenCode's mode reminders. Compatibility with other versions or custom agents requires separate verification.
 
-In Plan mode, the MCP bridge allows only `read`, `glob`, `grep`, and `question`, and no ACP execution approvals are granted for other bridged tools. Writing plan-directory files, running commands, delegating tasks, and custom tools are unsupported; Build is unchanged. The proxy does not sandbox Cursor's native runtime.
+In both Plan and Build, the proxy forwards the declared tools subject to `tool_choice`; OpenCode controls their execution permissions. Plan can inspect Git history through bridged command tools and write plan files when OpenCode permits it. The proxy still selects Cursor's Plan mode and rejects native-tool approval requests in that mode, even with `--allow-cursor-tools`. It does not sandbox Cursor's native runtime.
 
 ## Empty-reply recovery
 

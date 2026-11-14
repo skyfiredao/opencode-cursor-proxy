@@ -1,5 +1,4 @@
 use crate::{
-    chat::ExecutionMode,
     error::ApiError,
     tools::{FunctionCall, ToolCall, ToolCatalog},
 };
@@ -47,7 +46,6 @@ pub struct HostCall {
 
 #[derive(Clone)]
 struct Tools {
-    mode: ExecutionMode,
     catalog: Arc<ToolCatalog>,
     definitions: Arc<Vec<Tool>>,
     calls: mpsc::Sender<HostCall>,
@@ -76,12 +74,6 @@ impl ServerHandler for Tools {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        if !self.mode.allows_tool(&request.name) {
-            return Err(ErrorData::invalid_params(
-                format!("Plan mode forbids host tool: {}", request.name),
-                None,
-            ));
-        }
         let id = serde_json::to_string(&context.id)
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         let cancelled = self
@@ -231,11 +223,9 @@ async fn authorize(State(access): State<Access>, request: Request, next: Next) -
 
 impl Bridge {
     pub async fn open(
-        mut catalog: ToolCatalog,
+        catalog: ToolCatalog,
         calls: mpsc::Sender<HostCall>,
-        mode: ExecutionMode,
     ) -> Result<Self, ApiError> {
-        catalog.tools.retain(|tool| mode.allows_tool(&tool.name));
         let mut definitions = Vec::new();
         for spec in &catalog.tools {
             if spec.name.is_empty()
@@ -262,7 +252,6 @@ impl Bridge {
         let stop = CancellationToken::new();
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let tools = Tools {
-            mode,
             catalog: Arc::new(catalog),
             definitions: Arc::new(definitions),
             calls,

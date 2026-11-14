@@ -314,7 +314,7 @@ impl SessionStore {
                 if connection.capabilities["mcpCapabilities"]["http"] != true {
                     return Err(ApiError::upstream("Cursor ACP does not support HTTP MCP"));
                 }
-                Some(Bridge::open(catalog.clone(), calls, request.execution_mode()).await?)
+                Some(Bridge::open(catalog.clone(), calls).await?)
             };
             let servers: Vec<_> = bridge
                 .as_ref()
@@ -386,7 +386,7 @@ impl SessionStore {
             let mut text = render_history(&request.messages);
             if !catalog.tools.is_empty() {
                 text.push_str(
-                    "\nUse the cursor_proxy MCP server for client-provided tools when applicable.",
+                    "\nUse the cursor_proxy MCP server for client-provided tools, including command execution when available. OpenCode checks their permissions in both Plan and Build modes.",
                 );
             }
             let activity = connection.tool_activity();
@@ -538,7 +538,7 @@ impl SessionStore {
                         if text.is_empty() && !called {
                             if saw_thought && !repaired && host_calls.is_empty() && connection.tool_activity() == activity && bridge.as_ref().is_none_or(|bridge| bridge.tool_activity() == mcp_activity) {
                                 repaired = true;
-                                connection.allow_tools(&session, SERVER_NAME, [], request.execution_mode()).await;
+                                connection.revoke_tools().await;
                                 if connection.tool_activity() != activity || bridge.as_ref().is_some_and(|bridge| bridge.tool_activity() != mcp_activity) || !host_calls.is_empty() {
                                     return Err(ApiError::upstream("Tool activity arrived before final-answer recovery"));
                                 }

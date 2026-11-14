@@ -69,7 +69,7 @@ fn recorded_plan_directory_is_not_tied_to_one_home_path() {
 }
 
 #[test]
-fn effective_catalog_preserves_choices_and_filters_only_plan_tools() {
+fn effective_catalog_delegates_plan_and_build_tools_to_opencode() {
     let names = [
         "read",
         "glob",
@@ -100,28 +100,27 @@ fn effective_catalog_preserves_choices_and_filters_only_plan_tools() {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            if plan {
-                names[..4].to_vec()
-            } else {
-                names.to_vec()
-            }
+            names.to_vec()
         );
-        chat.tool_choice = Some(json!({"type":"function","function":{"name":"read"}}));
-        let catalog = chat
-            .catalog()
-            .expect("allowed named choice in mixed catalog");
-        assert_eq!(catalog.tools.len(), 1);
-        assert_eq!(catalog.tools[0].name, "read");
+        for name in ["read", "write", "bash", "shell", "execute", "task"] {
+            chat.tool_choice = Some(json!({"type":"function","function":{"name":name}}));
+            let catalog = chat.catalog().expect("declared named choice");
+            assert_eq!(catalog.tools.len(), 1);
+            assert_eq!(catalog.tools[0].name, name);
+        }
+        chat.tool_choice = Some(json!({"type":"function","function":{"name":"missing"}}));
+        assert!(
+            chat.catalog().is_err(),
+            "undeclared tools must still be rejected"
+        );
         chat.tool_choice = Some(json!("none"));
         assert!(chat.catalog().expect("none").tools.is_empty());
         chat.tools = vec![json!({"function":{"name":"write","parameters":{"type":"object"}}})];
         chat.tool_choice = Some(json!("auto"));
-        assert_eq!(
-            chat.catalog().expect("text-only Plan").tools.is_empty(),
-            plan
-        );
+        assert_eq!(chat.catalog().expect("auto catalog").tools.len(), 1);
         chat.tool_choice = Some(json!("required"));
-        assert_eq!(chat.catalog().is_err(), plan);
+        assert_eq!(chat.catalog().expect("required catalog").tools.len(), 1);
+        assert!(chat.check_tool_choice(&[]).is_err());
         chat.tool_choice = Some(json!("none"));
         chat.tools =
             vec![json!({"function":{"name":"broken","parameters":{"type":"not-a-json-type"}}})];

@@ -23,10 +23,6 @@ pub enum ExecutionMode {
 }
 
 impl ExecutionMode {
-    pub fn allows_tool(self, name: &str) -> bool {
-        self == Self::Build || matches!(name, "read" | "glob" | "grep" | "question")
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Build => "build",

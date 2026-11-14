@@ -1,10 +1,10 @@
-use cursor_proxy::{chat::ExecutionMode, mcp::Bridge, tools::ToolCatalog};
+use cursor_proxy::{mcp::Bridge, tools::ToolCatalog};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 #[tokio::test]
-async fn plan_mcp_filters_discovery_and_rejects_direct_mutations() {
+async fn mcp_delegates_declared_tools_and_preserves_host_decisions() {
     let names = [
         "read",
         "glob",
@@ -21,12 +21,12 @@ async fn plan_mcp_filters_discovery_and_rejects_direct_mutations() {
         "Read",
         "mcp__read",
     ];
-    for mode in [ExecutionMode::Plan, ExecutionMode::Build] {
+    for host_result in ["HOST_OK", "Permission denied by OpenCode"] {
         let catalog = ToolCatalog::parse(&names.iter().map(|name| json!({"function":{
             "name":name,"description":"Read only","parameters":{"type":"object"},"annotations":{"readOnlyHint":true}
         }})).collect::<Vec<_>>()).expect("catalog");
         let (sender, mut calls) = mpsc::channel(16);
-        let bridge = Bridge::open(catalog, sender, mode).await.expect("bridge");
+        let bridge = Bridge::open(catalog, sender).await.expect("bridge");
         let config = bridge.configuration();
         let url = config["url"].as_str().expect("url").to_owned();
         let auth = config["headers"][0]["value"]
@@ -60,41 +60,45 @@ async fn plan_mcp_filters_discovery_and_rejects_direct_mutations() {
         };
         rpc(1, "initialize", json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}})).await;
         let listed = rpc(2, "tools/list", json!({})).await;
-        let expected = if mode == ExecutionMode::Plan {
-            &names[..4]
-        } else {
-            &names[..]
-        };
         let listed: Vec<_> = listed["result"]["tools"]
             .as_array()
             .expect("tools")
             .iter()
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect();
-        assert_eq!(listed, expected);
+        assert_eq!(listed, names);
         for (index, name) in names.iter().enumerate() {
             let response = tokio::spawn(rpc(
                 index + 3,
                 "tools/call",
                 json!({"name":name,"arguments":{"filePath":"/home/test/.opencode/plan/plan.md"}}),
             ));
-            if mode == ExecutionMode::Plan && index >= 4 {
-                let denied = response.await.expect("denial");
-                assert!(denied.get("error").is_some(), "{name}: {denied}");
-                assert!(calls.try_recv().is_err(), "{name} reached host");
-            } else {
-                let call = tokio::time::timeout(Duration::from_secs(2), calls.recv())
-                    .await
-                    .expect("handoff deadline")
-                    .expect("call");
-                assert_eq!(call.call.function.name, *name);
-                call.reply.send("HOST_OK".into()).expect("result");
-                assert_eq!(
-                    response.await.expect("response")["result"]["content"][0]["text"],
-                    "HOST_OK"
-                );
-            }
+            let call = tokio::time::timeout(Duration::from_secs(2), calls.recv())
+                .await
+                .expect("handoff deadline")
+                .expect("call");
+            assert_eq!(call.call.function.name, *name);
+            assert!(
+                !response.is_finished(),
+                "the proxy must wait for the host's decision"
+            );
+            call.reply.send(host_result.into()).expect("result");
+            assert_eq!(
+                response.await.expect("response")["result"]["content"][0]["text"],
+                host_result
+            );
         }
+        let denied = rpc(
+            100,
+            "tools/call",
+            json!({"name":"undeclared","arguments":{}}),
+        )
+        .await;
+        assert!(denied.get("error").is_some(), "{denied}");
+        assert!(
+            calls.try_recv().is_err(),
+            "undeclared tools must not reach host"
+        );
         bridge.close().await;
     }
 }
@@ -105,9 +109,7 @@ async fn mcp_tool_calls_wait_for_the_original_host_result() {
         "name":"host_echo","description":"Echo input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}
     }})]).expect("catalog");
     let (sender, mut calls) = mpsc::channel(8);
-    let bridge = Bridge::open(catalog, sender, ExecutionMode::Build)
-        .await
-        .expect("MCP server");
+    let bridge = Bridge::open(catalog, sender).await.expect("MCP server");
     let configuration = bridge.configuration();
     let url = configuration["url"].as_str().expect("URL").to_owned();
     let authorization = configuration["headers"][0]["value"]

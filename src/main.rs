@@ -21,6 +21,11 @@ struct Cli {
     timeout_secs: u64,
     #[arg(long, help = "Load project instructions")]
     load_skills: bool,
+    #[arg(
+        long,
+        help = "Approve Cursor native tools in Build; bypass OpenCode permissions"
+    )]
+    allow_cursor_tools: bool,
 }
 
 #[tokio::main]
@@ -101,6 +106,11 @@ async fn serve(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         password = args.password.is_some(),
         "listening"
     );
+    if args.allow_cursor_tools {
+        tracing::warn!(
+            "Cursor native tools are auto-approved in Build and bypass OpenCode permissions"
+        );
+    }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let version = match cursor_proxy::opencode::detect(std::path::Path::new("opencode")).await {
@@ -119,6 +129,7 @@ async fn serve(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
             timeout: Duration::from_secs(args.timeout_secs),
             trusted_workspace,
             load_skills: args.load_skills,
+            allow_cursor_tools: args.allow_cursor_tools,
         },
         token: args.password,
         models: ModelCache::new(version),

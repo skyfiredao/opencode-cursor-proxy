@@ -92,24 +92,26 @@ Unknown, duplicate, expired, or mismatched results are rejected. Parallel MCP ca
 
 The MCP bridge uses a random per-bridge bearer credential and binds to `127.0.0.1`. It rejects browser Origin headers, validates request sizes, and admits at most 16 pending calls. Explicit MCP cancellation releases the pending result receiver.
 
-## Plan policy and mode selection
+## Mode selection and host-tool authorization
 
 The proxy recognizes OpenCode's exact user-role Plan/Build reminders. The latest recognized reminder selects the mode; ordinary prose, quoted reminders, assistant messages, and tool output do not. Unrecognized or absent reminders default to Build.
 
-Original tool definitions are validated before constructing the effective catalog. Build retains declared tools subject to `tool_choice`. Plan admits only the exact builtin names `read`, `glob`, `grep`, and `question` when present in the request. Descriptions, aliases, and `readOnlyHint` metadata do not authorize a tool. This policy assumes trusted OpenCode builtin implementations; a name alone cannot authenticate a replacement implementation.
+Original tool definitions are validated before constructing the effective catalog. Plan and Build both retain declared tools subject to `tool_choice`, without a proxy-side tool-name whitelist. OpenCode owns execution authorization, including command permissions, normal-file edit restrictions, and permitted plan-file writes. Descriptions and `readOnlyHint` metadata do not grant permission. The proxy assumes the host enforces its own policy; it does not classify shell commands or duplicate OpenCode's permission rules.
 
 | Tool choice | Admission behavior |
 | --- | --- |
 | `none` | Empty host-tool catalog, after validating original definitions |
-| Named function | Select only that declared, mode-permitted tool; reject missing or forbidden names with HTTP 400 before starting Cursor |
-| `required` in Plan | Reject with HTTP 400 if filtering leaves no permitted tool |
-| `auto` or omitted | Use the effective catalog; an empty Plan catalog permits text-only replies |
+| Named function | Select only that declared tool; reject undeclared names with HTTP 400 before starting Cursor |
+| `required` | Retain declared tools and require a host tool call in the response |
+| `auto` or omitted | Use the declared catalog; an empty catalog permits text-only replies |
 
-The MCP server filters discovery and independently rejects forbidden direct calls before host handoff. ACP permission grants use the same policy and retain session/server correlation and single-use consumption. Replacing the grant policy clears pending grants. Plan therefore rejects bridge writes even to OpenCode's plan directory, command execution, delegation, and unsupported custom readers. Build keeps the existing tool behavior.
+The MCP server exposes the effective catalog and rejects undeclared direct calls and invalid arguments before host handoff. ACP bridge grants retain session/server correlation and single-use consumption in both modes. Replacing the grant policy clears pending grants. Approving a bridge call only allows it to reach OpenCode; it does not authorize the host operation. Host results, including permission denials, return to the original pending MCP call without proxy-side execution or automatic retries.
+
+Cursor native-tool approvals are separate. They are denied by default. The startup option `--allow-cursor-tools` enables automatic `allow_once` selection only for the current configured ACP session in Build mode. It never grants `allow_always`, does not authorize other blocking Cursor interactions, and remains inactive in Plan. Known MCP calls cannot fall through to native approval after a bridge grant is consumed. Cancellation still returns a cancelled outcome. Native operations approved this way bypass OpenCode permissions and run with Cursor's OS authority; the option does not change host-tool authorization.
 
 Before prompting, the proxy selects Cursor's `plan` or `agent` mode through `session/set_config_option` when a mode option exists, otherwise through advertised legacy `session/set_mode`. It validates flat or grouped selectable values and awaits successful selection. Missing requested values or rejected RPCs fail without prompting; a rejected advertised control is not bypassed through another control. Without either control, Plan fails while Build may proceed without explicit mode selection.
 
-The conversation fingerprint retains the raw tools, tool choice, and execution mode, so filtering does not allow cross-mode tool-result continuation. These bridge controls and Cursor mode selection do not sandbox Cursor's native runtime or make OpenCode permissions universal.
+The conversation fingerprint retains the raw tools, tool choice, and execution mode, so tool-result continuation cannot cross modes even when both modes expose identical tools. These bridge controls and Cursor mode selection do not sandbox Cursor's native runtime or make OpenCode permissions universal.
 
 ## Event ordering and cancellation
 
@@ -139,7 +141,7 @@ The MCP ingress separately counts authenticated `tools/call` requests, including
 
 Recovery sends one short final-answer request to the same ACP session. It does not replay history or the original task, select another model, or reset the request deadline. Both attempts remain part of one HTTP completion and share its completion ID. Reasoning stays in `reasoning_content` and is never substituted for reply text.
 
-Host tool permission grants are cleared before recovery. New MCP calls or observed native tool activity during recovery fail the conversation. A second empty reply also fails. The recovery budget resets only for a new user turn, not for each internal prompt or tool attachment.
+Host tool permission grants are cleared and native-tool approvals are disabled before recovery, including when `--allow-cursor-tools` was enabled at startup. New MCP calls or observed native tool activity during recovery fail the conversation. A second empty reply also fails. The recovery budget resets only for a new user turn, not for each internal prompt or tool attachment.
 
 These checks use observed protocol activity. Cursor native operations can occur without a client permission request, and the proxy cannot undo them. Recovery is not a pre-execution sandbox or proof that no unreported side effect occurred. It may incur an additional model call; its success rate depends on the CLI and model.
 
@@ -227,9 +229,9 @@ The startup workspace is always declared trusted to Cursor, using the canonical 
 
 ## Verification seams
 
-- [ACP tests](tests/acp.rs) exercise notification staging, response application, Plan-filtered grants, cancellation, and child ownership.
+- [ACP tests](tests/acp.rs) exercise notification staging, response application, correlated bridge grants in both modes, Build-only native opt-in, cancellation, and child ownership.
 - [MCP tests](tests/mcp.rs) exercise discovery/direct-call policy, access controls, and original-call result delivery/cancellation.
-- [Conversation tests](tests/session.rs) exercise thread and mode isolation, history matching, completed-process cleanup, per-turn usage isolation, backpressure, and bounded recovery.
+- [Conversation tests](tests/session.rs) exercise Plan command handoff with Git results or host denials, thread and mode isolation, history matching, completed-process cleanup, per-turn usage isolation, backpressure, and bounded recovery.
 - [HTTP tests](tests/http.rs) exercise JSON/SSE mapping, reported-usage priority including zero and recovery, effective catalogs, workspace behavior, and automatic configuration.
 - [Checkpoint tests](tests/usage.rs) exercise read-only state, schema/decoder limits, WAL, lock contention, root freshness, missing/corrupt stores, publication cancellation, and executable JSON/SSE fallback.
 - [Configuration tests](tests/config.rs) exercise missing-limit publication, preserved overrides/prices, JSONC, and concurrent catalog/context writes.

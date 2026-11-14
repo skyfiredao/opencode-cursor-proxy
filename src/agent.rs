@@ -22,6 +22,7 @@ pub struct AgentConfig {
     pub timeout: Duration,
     pub trusted_workspace: Option<PathBuf>,
     pub load_skills: bool,
+    pub allow_cursor_tools: bool,
 }
 
 #[cfg(windows)]

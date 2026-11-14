@@ -77,7 +77,6 @@ impl ChatRequest {
         if self.tool_choice.as_ref().and_then(Value::as_str) == Some("none") {
             return Ok(ToolCatalog::default());
         }
-        let mode = self.execution_mode();
         if let Some(name) = self
             .tool_choice
             .as_ref()
@@ -89,21 +88,7 @@ impl ChatRequest {
                     "tool_choice must name an advertised tool",
                 ));
             }
-            if !mode.allows_tool(name) {
-                return Err(ApiError::bad_request(format!(
-                    "Plan mode forbids tool_choice for {name}"
-                )));
-            }
             catalog.tools.retain(|tool| tool.name == name);
-        }
-        catalog.tools.retain(|tool| mode.allows_tool(&tool.name));
-        if mode == ExecutionMode::Plan
-            && catalog.tools.is_empty()
-            && self.tool_choice.as_ref().and_then(Value::as_str) == Some("required")
-        {
-            return Err(ApiError::bad_request(
-                "Plan mode has no permitted tools for tool_choice=required",
-            ));
         }
         Ok(catalog)
     }
