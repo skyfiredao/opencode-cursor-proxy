@@ -1,53 +1,6 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[derive(Debug, Deserialize)]
-pub struct AgentEvent {
-    #[serde(flatten)]
-    pub kind: EventKind,
-    pub session_id: Option<String>,
-    pub timestamp_ms: Option<u64>,
-    pub model_call_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub enum EventKind {
-    #[serde(rename = "system")]
-    System {},
-    #[serde(rename = "user")]
-    User {},
-    #[serde(rename = "assistant")]
-    Assistant { message: Value },
-    #[serde(rename = "thinking")]
-    Thinking {
-        subtype: Option<String>,
-        text: Option<String>,
-    },
-    #[serde(rename = "tool_call")]
-    ToolCall {
-        subtype: Option<String>,
-        call_id: Option<String>,
-        tool_call: Value,
-        name: Option<String>,
-    },
-    #[serde(rename = "result")]
-    Result {
-        #[serde(default)]
-        is_error: bool,
-        subtype: Option<String>,
-        result: Option<String>,
-        usage: Option<Usage>,
-    },
-    #[serde(rename = "error")]
-    Error {
-        message: Option<String>,
-        error: Option<Value>,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {

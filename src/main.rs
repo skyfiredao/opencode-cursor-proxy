@@ -32,10 +32,11 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,rmcp=warn")),
         )
         .with_writer(std::io::stderr)
         .with_ansi(false)
+        .with_target(false)
         .init();
 
     let mut command = Cli::command();
@@ -99,28 +100,27 @@ async fn serve(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "http://{}/v1",
         std::net::SocketAddr::new(host, address.port())
     );
-    tracing::info!(
-        addr = %listener.local_addr()?,
-        workspace = %workspace.display(),
-        cursor_agent = %args.cursor_agent.display(),
-        password = args.password.is_some(),
-        "listening"
-    );
     if args.allow_cursor_tools {
-        tracing::warn!(
-            "Cursor native tools are auto-approved in Build and bypass OpenCode permissions"
-        );
+        tracing::warn!("native tools bypass OpenCode permissions in Build");
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let version = match cursor_proxy::opencode::detect(std::path::Path::new("opencode")).await {
         Ok(version) => version,
         Err(error) => {
-            tracing::warn!(%error, "Cannot detect OpenCode version; using V2 configuration");
+            tracing::warn!(%error, "OpenCode version unknown; using V2");
             cursor_proxy::opencode::Version::V2
         }
     };
-    tracing::info!(?version, "selected OpenCode configuration format");
+    tracing::info!(
+        addr = %address,
+        workspace = %workspace.display(),
+        agent = %args.cursor_agent.display(),
+        auth = args.password.is_some(),
+        config = %config.display(),
+        opencode = ?version,
+        "listen"
+    );
     let trusted_workspace = Some(workspace.clone());
     let state = Arc::new(server::AppState {
         workspace,
@@ -133,13 +133,13 @@ async fn serve(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         token: args.password,
         models: ModelCache::new(version),
-        sessions: Arc::new(cursor_proxy::session::SessionStore::with_configuration(
-            config.clone(),
-            version,
-        )),
+        sessions: Arc::new(
+            cursor_proxy::session::SessionStore::open(config.clone(), version).await?,
+        ),
         shutdown: shutdown_rx.clone(),
     });
     let model_state = state.clone();
+    let session_worker = tokio::spawn(state.sessions.clone().maintain(shutdown_rx.clone()));
     let refresher = tokio::spawn(async move {
         model_state
             .models
@@ -163,6 +163,7 @@ async fn serve(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .await;
     let _stopped = shutdown_tx.send(true);
     refresher.await?;
+    session_worker.await?;
     result?;
     Ok(())
 }

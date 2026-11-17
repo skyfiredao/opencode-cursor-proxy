@@ -1,8 +1,5 @@
 use super::{ChatRequest, Message};
-use crate::{
-    error::ApiError,
-    tools::{ToolCatalog, render_history},
-};
+use crate::error::ApiError;
 use std::{io::ErrorKind, path::Path};
 use tokio::io::AsyncReadExt;
 
@@ -56,29 +53,4 @@ pub(crate) async fn load_workspace_instructions(
         },
     );
     Ok(Some(instructions))
-}
-
-pub fn full(request: &ChatRequest, catalog: &ToolCatalog) -> String {
-    let mut parts = Vec::new();
-    let tools = catalog.prompt();
-    if !tools.is_empty() {
-        parts.push(tools);
-    }
-    if let Some(choice) = &request.tool_choice {
-        if choice.as_str() == Some("required") {
-            parts.push(
-                "SYSTEM: You must call at least one of the advertised host tools.".to_owned(),
-            );
-        }
-        if let Some(name) = choice
-            .pointer("/function/name")
-            .and_then(serde_json::Value::as_str)
-        {
-            parts.push(format!(
-                "SYSTEM: You must call the advertised host tool {name}."
-            ));
-        }
-    }
-    parts.push(render_history(&request.messages));
-    parts.join("\n\n")
 }

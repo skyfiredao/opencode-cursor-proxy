@@ -358,6 +358,35 @@ impl Connection {
         Ok(self.call_ordered(method, params).await?.apply())
     }
 
+    pub async fn load_session(&mut self, params: Value) -> Result<Value, ApiError> {
+        let request = self
+            .peer
+            .prepare_request(UntypedMessage::new("session/load", params).map_err(protocol_error)?);
+        let mut pending = PendingRequest(Some(request.cancellation_handle()));
+        let (sender, mut received) = oneshot::channel();
+        request
+            .on_receiving_result(async move |result| {
+                let _delivered = sender.send(result);
+                Ok(())
+            })
+            .map_err(protocol_error)?;
+        let timeout = self.timeout;
+        let result = tokio::time::timeout(timeout, async {
+            loop {
+                tokio::select! {
+                    result = &mut received => return result.map_err(|_| ApiError::upstream("ACP load response was dropped"))?.map_err(protocol_error),
+                    event = self.next() => match event {
+                        Some(Event::Exited(error)) => return Err(error),
+                        None => return Err(ApiError::upstream("ACP closed during session load")),
+                        _ => (),
+                    }
+                }
+            }
+        }).await.map_err(|_| ApiError::upstream("ACP session load timed out"))?;
+        pending.0 = None;
+        result
+    }
+
     pub async fn call_ordered(
         &self,
         method: &str,

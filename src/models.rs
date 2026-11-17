@@ -101,17 +101,22 @@ impl ModelCache {
                 _ = timer.tick() => (),
             }
             let started = Instant::now();
-            tracing::info!("refreshing model catalog");
+            tracing::debug!("models refresh");
             let result = tokio::select! {
                 _ = shutdown.changed() => break,
                 result = self.refresh(binary, config, base_url, token) => result,
             };
             match result {
-                Ok(result) => tracing::info!(models = result.models,
-                    config_updated = result.config_changed, config = %config.display(),
-                    elapsed_ms = %started.elapsed().as_millis(), "model catalog refreshed"),
-                Err(error) => tracing::warn!(error = ?error, config = %config.display(),
-                    elapsed_ms = %started.elapsed().as_millis(), "model refresh failed; keeping previous catalog and configuration"),
+                Ok(result) => {
+                    if result.config_changed {
+                        tracing::info!(count = result.models, ms = %started.elapsed().as_millis(), config = "updated", "models");
+                    } else {
+                        tracing::info!(count = result.models, ms = %started.elapsed().as_millis(), "models");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = ?error.message, ms = %started.elapsed().as_millis(), "models refresh failed; keeping previous")
+                }
             }
         }
     }

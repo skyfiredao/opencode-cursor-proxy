@@ -13,6 +13,8 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatRequest {
+    #[serde(skip)]
+    pub session_id: Option<String>,
     pub model: Option<String>,
     #[serde(rename = "cursorModel")]
     pub cursor_model: Option<String>,

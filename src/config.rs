@@ -191,15 +191,13 @@ fn value_end(bytes: &[u8], start: usize) -> Result<usize, String> {
     Ok(index)
 }
 
-fn fields(
-    bytes: &[u8],
-) -> Result<(Map<String, Value>, Vec<(String, Range<usize>)>, usize), String> {
+type Fields = (Map<String, Value>, Vec<(String, Range<usize>)>, usize);
+
+fn fields(bytes: &[u8]) -> Result<Fields, String> {
     let source = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
-    let value = parse(source)?;
-    let object = value
-        .as_object()
-        .ok_or("Configuration node must be an object")?
-        .clone();
+    let Value::Object(object) = parse(source)? else {
+        return Err("Configuration node must be an object".to_owned());
+    };
     let start = skip_space(bytes, 0);
     let mut index = skip_space(bytes, start + 1);
     let mut result: Vec<(String, Range<usize>)> = Vec::new();

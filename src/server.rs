@@ -107,10 +107,23 @@ async fn completions(
             "Proxy is shutting down",
         ));
     }
-    let Json(request) =
+    let Json(mut request) =
         payload.map_err(|e| ApiError::new(e.status(), "invalid_request_error", e.body_text()))?;
     request.validate()?;
     request.catalog()?;
+    request.session_id = headers
+        .get("x-opencode-session-id")
+        .or_else(|| headers.get("x-session-id"))
+        .map(|value| {
+            let value = value
+                .to_str()
+                .map_err(|_| ApiError::bad_request("Session ID must be UTF-8"))?;
+            if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+                return Err(ApiError::bad_request("Invalid OpenCode session ID"));
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()?;
     let workspace = resolve_workspace(&headers, &state.workspace).await?;
     let model = request.model();
     let stream = request.stream;

@@ -2,7 +2,7 @@
 
 **[English](README.md)**
 
-通过 Cursor CLI 的 ACP 接口为 OpenCode 提供流式对话，使用 MCP 桥接工具，自动配置连接并同步模型列表。
+在 OpenCode 中使用 Cursor 模型，支持流式回复、工具调用、自动配置连接和更新模型列表。
 
 本项目为独立项目，并非 OpenCode 或 Cursor 官方项目，不保证始终兼容官方 `cursor-agent` 的后续变更。
 
@@ -48,15 +48,14 @@ Windows PowerShell：
 .\cursor-proxy.exe --workspace .
 ```
 
-上述命令将当前目录作为项目目录，也可将 `--workspace` 的值改为目标项目的绝对路径。省略时默认使用当前目录。代理始终向 Cursor 声明启动时选定的工作目录可信。
+上述命令将当前目录作为项目目录，也可将 `--workspace` 的值改为目标项目的绝对路径。省略时默认使用当前目录。Cursor 会自动信任启动时选定的目录。
 
 默认监听 `127.0.0.1:32124`。保持终端运行，按 `Ctrl-C` 停止代理。
 
 ### 4. 在 OpenCode 选择模型
 
-1. 等待代理日志出现 `model catalog refreshed`。
-2. 在 OpenCode 中打开 `/models`。
-3. 选择 `cursor-proxy/composer-2.5` 或该 provider 下的其他模型。
+1. 在 OpenCode 中打开 `/models`。
+2. 选择 `cursor-proxy/composer-2.5` 或该 provider 下的其他模型。
 
 连接地址和模型列表自动写入配置，无需执行 `/connect`。列表未更新时执行 `/reload`。
 
@@ -64,9 +63,9 @@ Windows PowerShell：
 
 代理启动时获取模型列表，此后每小时刷新一次。刷新失败时保留上次结果，列表未变化时不重写配置。
 
-支持 OpenCode V1 和 V2。代理启动时检查 `PATH` 中 `opencode --version` 的结果，按对应格式写入配置：`1.x` 使用 V1 格式，`2.x` 使用 V2 格式。识别失败时告警并使用 V2 格式。切换 OpenCode 安装后，重启代理以重新识别。
+支持 OpenCode V1 和 V2。请将要使用的 `opencode` 命令放在 `PATH` 中，以便自动配置。版本识别失败时使用 V2 格式。切换 OpenCode 安装后需重启代理。
 
-V1 的上下文限制为 `0` 时表示未知，可由观测到的容量补齐；已有的正数上下文限制和显式输出限制保持不变。
+V1 的上下文限制为 `0` 时表示未知；已有的正数上下文限制和显式输出限制保持不变。
 
 同步保留注释、其他 provider、默认模型及已有模型的自定义设置，不自动删除旧模型。修改已有文件前生成 `.cursor-proxy-*.bak` 备份。
 
@@ -93,13 +92,13 @@ Windows 使用 `.\cursor-proxy.exe --help`。
 | `--host` | 监听地址 | `127.0.0.1` |
 | `--port` | 监听端口 | `32124` |
 | `--password` | 设置访问密码，允许其他电脑访问时必填 | 未设置 |
-| `--workspace` | 项目目录 | 当前目录 |
+| `--workspace` | 默认项目目录 | 当前目录 |
 | `--cursor-agent` | Cursor CLI 路径 | `cursor-agent` |
 | `--timeout-secs` | 回复超时秒数 | `300` |
 | `--load-skills` | 加载 `AGENTS.md` 中的项目指令 | 关闭 |
 | `--allow-cursor-tools` | 在 Build 模式下自动批准 Cursor 原生工具 | 关闭 |
 
-代理使用 `--workspace` 指定的项目目录。切换项目时，停止代理，再用新目录启动。
+修改默认项目目录时，用新的 `--workspace` 值重启代理。
 
 ## HTTP 接口
 
@@ -110,28 +109,31 @@ Windows 使用 `.\cursor-proxy.exe --help`。
 | POST | `/v1/chat/completions` | 流式或非流式聊天 |
 
 - 也支持省略 `/v1` 前缀。
+- 设置 `--password` 后，API 请求需携带 `Authorization: Bearer <password>`；`/health` 无需认证。
 - 仅支持文本输入和单条回复（`n=1`），暂不支持图片、音频、采样参数和 token 预算设置。
-- 思考内容通过 `reasoning_content` 返回。统计优先使用上游分项用量；没有时，将当前 ACP 会话的已用上下文数换算为标准 `usage`，供 OpenCode 显示。
-- 上下文回退使用最新已持久化计数，可能滞后；不虚构输出或缓存分项。窗口容量自动补入缺少该值的模型配置，保留已有设置。费用按已有模型单价估算，不代表 Cursor 实际账单；未配置单价时可能不显示费用。
+- 思考内容通过 `reasoning_content` 返回；有统计数据时，通过 `usage` 返回 token 用量和上下文估计。
+- 上下文估计可能滞后。费用按已有模型单价估算，不代表 Cursor 实际账单；未配置单价时可能不显示费用。
+- 需要延续会话时，发送 `x-opencode-session-id`；没有该头时兼容旧版 `X-Session-Id`。两者均未提供时，请求独立处理。
+- API 客户端可通过 `x-opencode-directory` 提供绝对路径，覆盖默认目录，支持 UTF-8 百分号编码。其他目录可能需要 Cursor 信任确认。
 - 模型实际可用性取决于 Cursor 账号权限和额度。
 
 ## 工具与模式
 
-OpenCode 执行通过 MCP 桥转发的工具调用，结果回到原 ACP 对话后继续回复。Cursor 原生工具仍可能直接修改文件或执行命令，OpenCode 权限不覆盖这些操作。
+OpenCode 执行客户端提供的工具，并控制参数校验、执行权限和重试。Cursor 原生工具仍可能直接修改文件或执行命令，OpenCode 权限不覆盖这些操作。
 
-代理默认拒绝 Cursor 原生工具的审批请求。启动时添加 `--allow-cursor-tools`，可在 Build 模式下自动批准当前 ACP 会话的原生工具请求。这会允许原生文件修改和命令执行绕过 OpenCode 权限检查，并非只允许只读 Git 命令。该选项在 Plan 模式和空回复恢复期间不授予原生工具权限，也不改变 MCP 桥接工具权限或批准其他 Cursor 阻塞交互。
+代理默认拒绝 Cursor 原生工具的审批请求。启动时添加 `--allow-cursor-tools`，可在 Build 模式下自动批准原生工具请求，允许原生文件修改和命令执行绕过 OpenCode 权限检查。该选项不适用于 Plan 模式和空回复恢复，也不改变 OpenCode 管理的工具权限。
 
-工具结果续接无需额外参数。最终回复完成后，代理关闭该 ACP 对话；下一轮用户输入根据 OpenCode 提供的历史建立新对话。
+对话可以跨轮次延续，并在代理重启后恢复。无法恢复时，代理使用 OpenCode 提供的上下文创建新会话。
 
-代理根据 OpenCode 的模式提醒同步 Plan / Build；其他版本或自定义 agent 的兼容性需另行验证。
+会话关联数据保存在所选 OpenCode 配置目录下的 `cursor-proxy/sessions.db`。超过 90 天未使用的记录会自动清理，跳过正在处理请求和等待工具结果的会话。会话恢复不保证模型端缓存命中。
 
-Plan 和 Build 模式均按 `tool_choice` 转发声明的工具，由 OpenCode 控制执行权限。OpenCode 允许时，Plan 可通过桥接命令工具查看 Git 历史，也可写入计划文件。代理仍选择 Cursor 的 Plan 模式，并拒绝该模式下的原生工具审批，即使开启 `--allow-cursor-tools` 也不例外。Cursor 原生运行时不受代理沙箱保护。
+在 OpenCode 中切换 Plan / Build 即可；其他版本或自定义 agent 的兼容性需另行验证。
+
+Plan 和 Build 模式均按 `tool_choice` 转发声明的工具，由 OpenCode 控制执行权限。OpenCode 允许时，Plan 可通过桥接命令工具查看 Git 历史，也可写入计划文件。
 
 ## 空回复恢复
 
 上游正常结束但只有思考、没有正文，且未观测到工具活动时，代理在原对话中最多请求一次最终回答。不会重放原任务、自动切换模型或延长原请求超时；补答仍为空则报错。
-
-架构、线程续接和恢复边界见 [DESIGN.md](DESIGN.md)。
 
 ## 许可
 

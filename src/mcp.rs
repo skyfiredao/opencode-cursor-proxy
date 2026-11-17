@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -42,15 +42,62 @@ pub const SERVER_NAME: &str = "cursor_proxy";
 pub struct HostCall {
     pub call: ToolCall,
     pub reply: oneshot::Sender<String>,
+    turn: CancellationToken,
+    cancelled: CancellationToken,
+}
+
+impl HostCall {
+    pub fn is_closed(&self) -> bool {
+        self.reply.is_closed() || self.turn.is_cancelled() || self.cancelled.is_cancelled()
+    }
+
+    pub async fn closed(&mut self) {
+        tokio::select! {
+            _ = self.reply.closed() => (),
+            _ = self.turn.cancelled() => (),
+            _ = self.cancelled.cancelled() => (),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct Tools {
-    catalog: Arc<ToolCatalog>,
-    definitions: Arc<Vec<Tool>>,
+    published: Arc<RwLock<Published>>,
     calls: mpsc::Sender<HostCall>,
     stop: CancellationToken,
     pending: Arc<Mutex<HashMap<String, CancellationToken>>>,
+}
+
+struct Published {
+    definitions: Vec<Tool>,
+    turn: Option<CancellationToken>,
+}
+
+impl Published {
+    fn new(catalog: ToolCatalog) -> Result<Self, ApiError> {
+        let mut definitions = Vec::new();
+        for spec in catalog.tools {
+            if spec.name.is_empty()
+                || spec.name.len() > 128
+                || !spec
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            {
+                return Err(ApiError::bad_request(
+                    "Host tool name is not supported by MCP",
+                ));
+            }
+            let Value::Object(schema) = spec.parameters else {
+                return Err(ApiError::bad_request("MCP inputSchema must be an object"));
+            };
+            definitions.push(Tool::new(spec.name, spec.description, schema));
+        }
+        Ok(Self {
+            definitions,
+            turn: None,
+        })
+    }
 }
 
 impl ServerHandler for Tools {
@@ -64,7 +111,12 @@ impl ServerHandler for Tools {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
-            tools: self.definitions.as_ref().clone(),
+            tools: self
+                .published
+                .read()
+                .map_err(|_| ErrorData::internal_error("MCP catalog lock poisoned", None))?
+                .definitions
+                .clone(),
             ..Default::default()
         })
     }
@@ -83,41 +135,48 @@ impl ServerHandler for Tools {
             .get(&id)
             .cloned()
             .ok_or_else(|| ErrorData::internal_error("MCP request admission missing", None))?;
-        let spec = self
-            .catalog
-            .tools
-            .iter()
-            .find(|spec| spec.name == request.name)
-            .ok_or_else(|| ErrorData::invalid_params("Unknown host tool", None))?;
+        let (name, turn) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| ErrorData::internal_error("MCP catalog lock poisoned", None))?;
+            let turn = published
+                .turn
+                .clone()
+                .filter(|turn| !turn.is_cancelled())
+                .ok_or_else(|| ErrorData::invalid_request("No active host turn", None))?;
+            let name = published
+                .definitions
+                .iter()
+                .find(|spec| spec.name == request.name)
+                .map(|spec| spec.name.to_string())
+                .ok_or_else(|| ErrorData::invalid_params("Unknown host tool", None))?;
+            (name, turn)
+        };
         let arguments = Value::Object(request.arguments.unwrap_or_default());
-        let validator = jsonschema::validator_for(&spec.parameters).map_err(|error| {
-            ErrorData::internal_error(format!("Invalid host tool schema: {error}"), None)
-        })?;
-        if let Err(error) = validator.validate(&arguments) {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "Invalid tool arguments: {error}"
-            ))])
-            .into());
-        }
         let (reply, result) = oneshot::channel();
         let call = HostCall {
             call: ToolCall {
                 id: format!("call_{}", Uuid::new_v4().simple()),
                 kind: "function".to_owned(),
                 function: FunctionCall {
-                    name: spec.name.clone(),
+                    name,
                     arguments: arguments.to_string(),
                 },
             },
             reply,
+            turn: turn.clone(),
+            cancelled: cancelled.clone(),
         };
         tokio::select! {
+            _ = turn.cancelled() => return Err(ErrorData::internal_error("Host turn ended", None)),
             _ = cancelled.cancelled() => return Err(ErrorData::internal_error("MCP call cancelled", None)),
             _ = context.ct.cancelled() => return Err(ErrorData::internal_error("MCP call cancelled", None)),
             _ = self.stop.cancelled() => return Err(ErrorData::internal_error("MCP bridge closed", None)),
             sent = self.calls.send(call) => sent.map_err(|_| ErrorData::internal_error("Host conversation closed", None))?,
         }
         tokio::select! {
+            _ = turn.cancelled() => Err(ErrorData::internal_error("Host turn ended", None)),
             _ = cancelled.cancelled() => Err(ErrorData::internal_error("MCP call cancelled", None)),
             _ = context.ct.cancelled() => Err(ErrorData::internal_error("MCP call cancelled", None)),
             _ = self.stop.cancelled() => Err(ErrorData::internal_error("MCP bridge closed", None)),
@@ -130,6 +189,7 @@ impl ServerHandler for Tools {
 }
 
 pub struct Bridge {
+    published: Arc<RwLock<Published>>,
     url: String,
     authorization: String,
     stop: CancellationToken,
@@ -226,34 +286,11 @@ impl Bridge {
         catalog: ToolCatalog,
         calls: mpsc::Sender<HostCall>,
     ) -> Result<Self, ApiError> {
-        let mut definitions = Vec::new();
-        for spec in &catalog.tools {
-            if spec.name.is_empty()
-                || spec.name.len() > 128
-                || !spec
-                    .name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-            {
-                return Err(ApiError::bad_request(
-                    "Host tool name is not supported by MCP",
-                ));
-            }
-            let schema = spec
-                .parameters
-                .as_object()
-                .ok_or_else(|| ApiError::bad_request("MCP inputSchema must be an object"))?;
-            definitions.push(Tool::new(
-                spec.name.clone(),
-                spec.description.clone(),
-                schema.clone(),
-            ));
-        }
+        let published = Arc::new(RwLock::new(Published::new(catalog)?));
         let stop = CancellationToken::new();
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let tools = Tools {
-            catalog: Arc::new(catalog),
-            definitions: Arc::new(definitions),
+            published: published.clone(),
             calls,
             stop: stop.clone(),
             pending: pending.clone(),
@@ -297,6 +334,7 @@ impl Bridge {
             }
         });
         Ok(Self {
+            published,
             url: format!("http://{address}/mcp"),
             authorization,
             stop,
@@ -307,6 +345,43 @@ impl Bridge {
 
     pub fn configuration(&self) -> Value {
         json!({"type":"http","name":SERVER_NAME,"url":self.url,"headers":[{"name":"Authorization","value":self.authorization}]})
+    }
+
+    pub fn replace_catalog(&self, catalog: ToolCatalog) -> Result<(), ApiError> {
+        let replacement = Published::new(catalog)?;
+        let mut published = self
+            .published
+            .write()
+            .map_err(|_| ApiError::upstream("MCP catalog lock poisoned"))?;
+        if let Some(turn) = published.turn.take() {
+            turn.cancel();
+        }
+        *published = replacement;
+        Ok(())
+    }
+
+    pub fn begin_turn(&self) -> Result<(), ApiError> {
+        let mut published = self
+            .published
+            .write()
+            .map_err(|_| ApiError::upstream("MCP catalog lock poisoned"))?;
+        if let Some(turn) = published.turn.replace(CancellationToken::new()) {
+            turn.cancel();
+        }
+        Ok(())
+    }
+
+    pub fn end_turn(&self) -> Result<(), ApiError> {
+        if let Some(turn) = self
+            .published
+            .write()
+            .map_err(|_| ApiError::upstream("MCP catalog lock poisoned"))?
+            .turn
+            .take()
+        {
+            turn.cancel();
+        }
+        Ok(())
     }
 
     pub fn tool_activity(&self) -> usize {
