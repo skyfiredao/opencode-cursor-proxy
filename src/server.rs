@@ -133,7 +133,6 @@ async fn completions(
         request,
         workspace,
         state.shutdown.clone(),
-        id.clone(),
     );
     sse::respond(rx, stream, model, id).await
 }

@@ -26,6 +26,8 @@ Download your platform's package from a `cursor-proxy-YYYY-MMDD` entry in the re
 
 Supported platforms: Windows amd64, macOS arm64 (macOS 14 or newer), Linux arm64, and Linux amd64.
 
+Debug builds from GitHub Actions contain the executable directly inside the artifact ZIP, with no nested archive. After extracting it on macOS/Linux, run `chmod +x ./cursor-proxy`.
+
 On macOS, if Apple cannot verify the executable is free of malware, confirm its source is trusted before removing its quarantine attribute. Run from the directory containing the executable:
 
 ```bash
@@ -63,7 +65,7 @@ The endpoint and model list are configured automatically; no `/connect` step is 
 
 The proxy fetches models on startup and every hour afterward. Failed refreshes keep the previous result. Unchanged lists do not rewrite configuration.
 
-OpenCode V1 and V2 are supported. Keep the intended `opencode` command on `PATH` for automatic configuration. If version detection fails, the proxy uses V2. Restart the proxy after switching OpenCode installations.
+OpenCode V1 and V2 are supported. Keep the intended `opencode` command on `PATH` for automatic configuration. If version detection fails, the proxy exits with an error. Restart the proxy after switching OpenCode installations.
 
 In V1, a context limit of `0` means unknown. Existing positive context limits and explicit output limits are preserved.
 
@@ -86,6 +88,8 @@ View options (`-h` also works):
 ```
 
 On Windows, use `.\cursor-proxy.exe --help`.
+
+`--version` shows `0.2.N+<SHA7>`, where `N` counts commits affecting `cursor-proxy/` since the `0.2` version series was introduced. Rebuilding the same commit does not increment it.
 
 | Option | Purpose | Default |
 | --- | --- | --- |

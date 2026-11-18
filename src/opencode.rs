@@ -56,56 +56,59 @@ impl Version {
 }
 
 pub async fn detect(binary: &std::path::Path) -> Result<Version, String> {
-    use crate::agent::{Process, cli_command};
-    use std::{process::Stdio, time::Duration};
+    use crate::agent::{Process, cli_command, output_preview};
+    use std::process::Stdio;
     use tokio::io::AsyncReadExt;
-    let operation = async {
-        let mut command = cli_command(binary, "OpenCode")
-            .map_err(|_| "Cannot resolve OpenCode CLI".to_owned())?;
-        command
-            .arg("--version")
-            .env_remove("CURSOR_API_KEY")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut process = Process::spawn(&mut command)
-            .map_err(|_| "Cannot start OpenCode version command".to_owned())?;
-        let stdout = process
-            .child
-            .stdout
-            .take()
-            .ok_or("Missing OpenCode version stdout")?;
-        let stderr = process
-            .child
-            .stderr
-            .take()
-            .ok_or("Missing OpenCode version stderr")?;
-        let read = |reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>| async move {
-            let mut output = Vec::new();
-            reader
-                .take(8193)
-                .read_to_end(&mut output)
-                .await
-                .map_err(|_| "Cannot read OpenCode version output".to_owned())?;
-            if output.len() > 8192 {
-                return Err("OpenCode version output exceeds 8 KiB".to_owned());
-            }
-            Ok(output)
-        };
-        let (output, _) = tokio::try_join!(read(Box::new(stdout)), read(Box::new(stderr)))?;
-        let status = process
-            .child
-            .wait()
+    let mut command =
+        cli_command(binary, "OpenCode").map_err(|_| "Cannot resolve OpenCode CLI".to_owned())?;
+    command
+        .arg("--version")
+        .env_remove("CURSOR_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    tracing::debug!(program = ?command.as_std().get_program(), args = ?command.as_std().get_args().collect::<Vec<_>>(), "opencode command");
+    let mut process = Process::spawn(&mut command)
+        .map_err(|_| "Cannot start OpenCode version command".to_owned())?;
+    let stdout = process
+        .child
+        .stdout
+        .take()
+        .ok_or("Missing OpenCode version stdout")?;
+    let stderr = process
+        .child
+        .stderr
+        .take()
+        .ok_or("Missing OpenCode version stderr")?;
+    let read = |stream: &'static str, reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>| async move {
+        let mut output = Vec::new();
+        reader
+            .take(8193)
+            .read_to_end(&mut output)
             .await
-            .map_err(|_| "Cannot wait for OpenCode version command".to_owned())?;
-        if !status.success() {
-            return Err("OpenCode version command failed".to_owned());
+            .map_err(|_| "Cannot read OpenCode version output".to_owned())?;
+        tracing::debug!(stream, bytes = output.len(), utf8_valid = std::str::from_utf8(&output).is_ok(), truncated = output.len() > 4096, preview = ?output_preview(&output), "opencode output");
+        if output.len() > 8192 {
+            return Err("OpenCode version output exceeds 8 KiB".to_owned());
         }
-        Version::parse(
-            std::str::from_utf8(&output).map_err(|_| "OpenCode version is not UTF-8".to_owned())?,
-        )
+        Ok(output)
     };
-    tokio::time::timeout(Duration::from_secs(2), operation)
+    let (output, _) = tokio::try_join!(
+        read("stdout", Box::new(stdout)),
+        read("stderr", Box::new(stderr))
+    )?;
+    let status = process
+        .child
+        .wait()
         .await
-        .map_err(|_| "OpenCode version command timed out".to_owned())?
+        .map_err(|_| "Cannot wait for OpenCode version command".to_owned())?;
+    tracing::debug!(exit_code = ?status.code(), status = %status, "opencode exit");
+    if !status.success() {
+        return Err("OpenCode version command failed".to_owned());
+    }
+    let detected = Version::parse(
+        std::str::from_utf8(&output).map_err(|_| "OpenCode version is not UTF-8".to_owned())?,
+    );
+    tracing::debug!(version = ?detected, "opencode detected");
+    detected
 }

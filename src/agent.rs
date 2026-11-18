@@ -25,6 +25,35 @@ pub struct AgentConfig {
     pub allow_cursor_tools: bool,
 }
 
+pub(crate) fn output_preview(output: &[u8]) -> String {
+    let lower = String::from_utf8_lossy(output).to_ascii_lowercase();
+    if [
+        "authorization",
+        "bearer ",
+        "api_key",
+        "api key",
+        "apikey",
+        "token",
+        "password",
+        "secret",
+        "-----begin",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return "<redacted:credentials>".to_owned();
+    }
+    if output.len() <= 4096 {
+        return String::from_utf8_lossy(output).into_owned();
+    }
+    format!(
+        "{}<... {} bytes omitted ...>{}",
+        String::from_utf8_lossy(&output[..2048]),
+        output.len() - 4096,
+        String::from_utf8_lossy(&output[output.len() - 2048..])
+    )
+}
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -63,21 +92,31 @@ fn windows_cli_path(binary: &Path, name: &str) -> Result<PathBuf, ApiError> {
             }
         }
     }
+    tracing::debug!(cli = name, requested = ?binary, candidates = ?candidates.iter().take(32).collect::<Vec<_>>(), count = candidates.len(), "cli lookup");
     let selected = candidates
         .into_iter()
         .find(|path| path.is_file())
         .ok_or_else(|| {
             ApiError::upstream(format!("{name} CLI not found; install it or check PATH"))
         })?;
+    tracing::debug!(cli = name, selected = ?selected, "cli selected");
     std::path::absolute(selected)
         .map_err(|error| ApiError::upstream(format!("Cannot resolve {name} CLI path: {error}")))
 }
 
 pub(crate) fn cursor_command(binary: &Path) -> Result<Command, ApiError> {
-    cli_command(binary, "Cursor")
+    let mut command = cli_command(binary, "Cursor")?;
+    command.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
+    tracing::debug!(
+        force_color_removed = true,
+        no_color = "1",
+        "cursor color policy"
+    );
+    Ok(command)
 }
 
 pub(crate) fn cli_command(binary: &Path, _name: &str) -> Result<Command, ApiError> {
+    tracing::debug!(cli = _name, requested = ?binary, "cli request");
     #[cfg(windows)]
     {
         let launcher = windows_cli_path(binary, _name)?;
@@ -102,6 +141,7 @@ pub(crate) fn cli_command(binary: &Path, _name: &str) -> Result<Command, ApiErro
                 "Unsupported Windows {_name} launcher; use a .exe, .ps1, or .cmd with a sibling .ps1"
             )));
         };
+        tracing::debug!(cli = _name, launcher = ?launcher, script = ?script, "cli launcher");
         if let Some(script) = script {
             let mut command = Command::new(windows_system_tool(
                 r"WindowsPowerShell\v1.0\powershell.exe",
@@ -139,6 +179,7 @@ impl Process {
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
         let child = command.kill_on_drop(true).spawn().map_err(|error| {
+            tracing::debug!(program = ?command.as_std().get_program(), kind = ?error.kind(), os_error = ?error.raw_os_error(), error = %error, "cli spawn failed");
             if error.kind() == std::io::ErrorKind::NotFound {
                 ApiError::upstream(
                     "cursor-agent binary not found; set --cursor-agent to its installed path",
@@ -148,6 +189,7 @@ impl Process {
             }
         })?;
         let pid = child.id();
+        tracing::debug!(program = ?command.as_std().get_program(), pid = ?pid, no_window = cfg!(windows), "cli process");
         Ok(Self { child, pid })
     }
 

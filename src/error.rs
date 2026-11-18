@@ -31,7 +31,7 @@ impl ApiError {
 
     pub fn from_agent(message: &str) -> Self {
         let lower = message.to_lowercase();
-        if [
+        if let Some(hint) = [
             "not logged in",
             "unauthenticated",
             "authentication required",
@@ -45,9 +45,15 @@ impl ApiError {
             "token has expired",
             "cursor-agent login",
         ]
-        .iter()
-        .any(|needle| lower.contains(needle))
+        .into_iter()
+        .find(|needle| lower.contains(*needle))
         {
+            tracing::debug!(
+                code = "cursor_auth_required",
+                hint,
+                inferred = true,
+                "agent error classified"
+            );
             Self::new(
                 StatusCode::UNAUTHORIZED,
                 "cursor_auth_required",

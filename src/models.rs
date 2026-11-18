@@ -1,8 +1,9 @@
 use crate::{
-    agent::{Process, cursor_command},
+    agent::{Process, cursor_command, output_preview},
     chat::sse::unix_time,
     error::ApiError,
 };
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 use std::{
     path::Path,
@@ -109,13 +110,19 @@ impl ModelCache {
             match result {
                 Ok(result) => {
                     if result.config_changed {
-                        tracing::info!(count = result.models, ms = %started.elapsed().as_millis(), config = "updated", "models");
+                        tracing::info!(result = "pass", count = result.models, ms = %started.elapsed().as_millis(), config = "updated", "models");
                     } else {
-                        tracing::info!(count = result.models, ms = %started.elapsed().as_millis(), "models");
+                        tracing::info!(result = "pass", count = result.models, ms = %started.elapsed().as_millis(), "models");
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(error = ?error.message, ms = %started.elapsed().as_millis(), "models refresh failed; keeping previous")
+                    let result = match error.code {
+                        "cursor_cli_unavailable" => "no-agent",
+                        "cursor_auth_required" => "auth",
+                        "cursor_model_catalog_error" => "catalog",
+                        _ => "error",
+                    };
+                    tracing::warn!(result, error = ?error.message, ms = %started.elapsed().as_millis(), "models")
                 }
             }
         }
@@ -140,14 +147,23 @@ pub fn parse(output: &str) -> Vec<Model> {
 
 pub async fn discover(binary: &Path) -> Result<Vec<Model>, ApiError> {
     let operation = async {
-        let mut command = cursor_command(binary)?;
+        tracing::debug!(home = ?std::env::var_os("HOME"), userprofile = ?std::env::var_os("USERPROFILE"), cursor_config_dir = ?std::env::var_os("CURSOR_CONFIG_DIR"), xdg_config_home = ?std::env::var_os("XDG_CONFIG_HOME"), appdata = ?std::env::var_os("APPDATA"), localappdata = ?std::env::var_os("LOCALAPPDATA"), force_color = ?std::env::var_os("FORCE_COLOR"), no_color = ?std::env::var_os("NO_COLOR"), api_key_present = std::env::var_os("CURSOR_API_KEY").is_some(), api_key_removed = true, "models environment");
+        tracing::debug!(path = ?std::env::var_os("PATH").map(|value| output_preview(value.to_string_lossy().as_bytes())), pathext = ?std::env::var_os("PATHEXT"), comspec = ?std::env::var_os("ComSpec"), systemroot = ?std::env::var_os("SystemRoot"), term = ?std::env::var_os("TERM"), term_program = ?std::env::var_os("TERM_PROGRAM"), "models search environment");
+        let mut command = cursor_command(binary).map_err(|mut error| {
+            error.code = "cursor_cli_unavailable";
+            error
+        })?;
         command
             .arg("--list-models")
             .env_remove("CURSOR_API_KEY")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut process = Process::spawn(&mut command)?;
+        tracing::debug!(agent = %binary.display(), program = ?command.as_std().get_program(), args = ?command.as_std().get_args().collect::<Vec<_>>(), cwd = ?std::env::current_dir(), "models command");
+        let mut process = Process::spawn(&mut command).map_err(|mut error| {
+            error.code = "cursor_cli_unavailable";
+            error
+        })?;
         let stdout = process
             .child
             .stdout
@@ -158,34 +174,48 @@ pub async fn discover(binary: &Path) -> Result<Vec<Model>, ApiError> {
             .stderr
             .take()
             .ok_or_else(|| ApiError::upstream("Missing model discovery stderr"))?;
-        let read = |reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>| async move {
+        let read = |stream: &'static str, reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>| async move {
             let mut bytes = Vec::new();
             reader
                 .take(1024 * 1024 + 1)
                 .read_to_end(&mut bytes)
                 .await
                 .map_err(|e| ApiError::upstream(format!("Cannot read model catalog: {e}")))?;
+            tracing::debug!(stream, bytes = bytes.len(), utf8_valid = std::str::from_utf8(&bytes).is_ok(), ansi = bytes.contains(&0x1b), nul = bytes.contains(&0), truncated = bytes.len() > 4096, preview = ?output_preview(&bytes), "models output");
             if bytes.len() > 1024 * 1024 {
                 return Err(ApiError::upstream("Model catalog output exceeds 1 MiB"));
             }
             String::from_utf8(bytes)
                 .map_err(|_| ApiError::upstream("Model catalog is not valid UTF-8"))
         };
-        let (output, errors) = tokio::try_join!(read(Box::new(stdout)), read(Box::new(stderr)))?;
+        let (output, errors) = tokio::try_join!(
+            read("stdout", Box::new(stdout)),
+            read("stderr", Box::new(stderr))
+        )?;
         let status = process
             .child
             .wait()
             .await
             .map_err(|e| ApiError::upstream(format!("Cannot wait for model catalog: {e}")))?;
+        tracing::debug!(exit_code = ?status.code(), status = %status, "models exit");
         if !status.success() {
             return Err(ApiError::from_agent(&errors));
         }
         let mut models = parse(&output);
+        let stdout_count = models.len();
         if models.is_empty() {
             models = parse(&errors);
         }
+        tracing::debug!(
+            count = models.len(),
+            stdout_count,
+            stderr_used = stdout_count == 0,
+            "models parsed"
+        );
         if models.is_empty() {
-            return Err(ApiError::upstream(
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "cursor_model_catalog_error",
                 "cursor-agent returned an empty or unrecognized model catalog",
             ));
         }

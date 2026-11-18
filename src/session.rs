@@ -154,9 +154,11 @@ fn history_boundaries(messages: &[Message]) -> Vec<String> {
 }
 
 fn fingerprint(request: &ChatRequest, workspace: &std::path::Path) -> String {
+    let default_choice = json!("auto");
+    let choice = request.tool_choice.as_ref().unwrap_or(&default_choice);
     hash(
         json!({"owner":request.session_id,"workspace":workspace,"model":request.model(),"tools":request.tools,
-        "choice":request.tool_choice,"mode":request.execution_mode().as_str()})
+        "choice":choice,"mode":request.execution_mode().as_str()})
         .to_string(),
     )
 }
@@ -271,12 +273,11 @@ impl SessionStore {
         mut request: ChatRequest,
         workspace: PathBuf,
         mut shutdown: watch::Receiver<bool>,
-        request_id: String,
     ) -> mpsc::Receiver<Update> {
         let (output, received) = mpsc::channel(16);
         let model = request.model();
         // Keep correlation fields available with warning-only filters.
-        let span = tracing::error_span!("chat", req = %request_id,
+        let span = tracing::error_span!("chat",
             oc = request.session_id.as_deref().unwrap_or("-"), model = ?model,
             cursor = tracing::field::Empty);
         tokio::spawn(async move {

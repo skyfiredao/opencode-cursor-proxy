@@ -1,11 +1,51 @@
-use std::{net::IpAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{fmt, io::IsTerminal, net::IpAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use cursor_proxy::{agent::AgentConfig, config, models::ModelCache, server};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{
+    EnvFilter,
+    fmt::{
+        FmtContext, FormatEvent, FormatFields, FormattedFields,
+        format::Writer,
+        time::{FormatTime, SystemTime},
+    },
+    registry::LookupSpan,
+};
+
+struct FlatLog;
+
+impl<S, N> FormatEvent<S, N> for FlatLog
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        context: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> fmt::Result {
+        SystemTime.format_time(&mut writer)?;
+        write!(writer, " {:>5} ", event.metadata().level())?;
+        context
+            .field_format()
+            .format_fields(writer.by_ref(), event)?;
+        if let Some(scope) = context.event_scope() {
+            for span in scope.from_root() {
+                let extensions = span.extensions();
+                if let Some(fields) = extensions.get::<FormattedFields<N>>()
+                    && !fields.is_empty()
+                {
+                    write!(writer, " {fields}")?;
+                }
+            }
+        }
+        writeln!(writer)
+    }
+}
 
 #[derive(Parser)]
-#[command(name = "cursor-proxy", version, about = "Connect OpenCode to Cursor")]
+#[command(name = "cursor-proxy", version = env!("CURSOR_PROXY_BUILD_VERSION"), about = "Connect OpenCode to Cursor")]
 struct Cli {
     #[arg(long, default_value = "127.0.0.1", help = "Listen address")]
     host: IpAddr,
@@ -36,8 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_writer(std::io::stderr)
         .with_ansi(false)
-        .with_target(false)
+        .event_format(FlatLog)
         .init();
+
+    tracing::debug!(version = env!("CURSOR_PROXY_BUILD_VERSION"), build = env!("CURSOR_PROXY_BUILD_COMMIT"), os = std::env::consts::OS, arch = std::env::consts::ARCH, pid = std::process::id(), exe = ?std::env::current_exe(), cwd = ?std::env::current_dir(), stdin_tty = std::io::stdin().is_terminal(), stdout_tty = std::io::stdout().is_terminal(), stderr_tty = std::io::stderr().is_terminal(), "proxy diagnostic");
 
     let mut command = Cli::command();
     command.build();
@@ -105,13 +147,7 @@ async fn serve(args: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let version = match cursor_proxy::opencode::detect(std::path::Path::new("opencode")).await {
-        Ok(version) => version,
-        Err(error) => {
-            tracing::warn!(%error, "OpenCode version unknown; using V2");
-            cursor_proxy::opencode::Version::V2
-        }
-    };
+    let version = cursor_proxy::opencode::detect(std::path::Path::new("opencode")).await?;
     tracing::info!(
         addr = %address,
         workspace = %workspace.display(),

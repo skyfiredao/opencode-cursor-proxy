@@ -8,6 +8,8 @@ Cursor Proxy connects a local OpenCode client to the installed Cursor CLI. OpenC
 
 `cursor-proxy [OPTIONS]` starts the foreground service directly. `-h` and `--help` show the same options and their purpose; there are no subcommands.
 
+`--version` reports `<major>.<minor>.<count>+<SHA7>`. Major/minor come from `Cargo.toml`. The build script walks first-parent manifest history to find where the current version series began, then counts subsequent commits affecting `cursor-proxy/`. Unrelated projects and repeated builds do not increment the count; a new major/minor series resets it to zero. The commit comes from `CURSOR_PROXY_BUILD_COMMIT` or Git HEAD. CI fetches complete history. Missing or shallow history falls back to the manifest patch with a build-time warning; missing commit identity uses `unknown`. HEAD/ref/shallow changes invalidate incremental metadata. Git is not needed at runtime.
+
 `--password` sets the proxy access password, independently of Cursor account login. It is optional for loopback listeners and required for non-loopback listeners. The HTTP API uses `Authorization: Bearer <password>`. Automatic OpenCode configuration stores the password in the provider's `options.apiKey` for V1 or `settings.apiKey` for V2. `/health` remains public. The listener serves plain HTTP.
 
 ## Components
@@ -136,7 +138,7 @@ Cursor native-tool approvals are denied by default. The startup option `--allow-
 
 Before prompting, the proxy selects Cursor's `plan` or `agent` mode through `session/set_config_option` when a mode option exists, otherwise through advertised legacy `session/set_mode`. It validates flat or grouped selectable values and awaits successful selection. Missing requested values or rejected RPCs fail without prompting; a rejected advertised control is not bypassed through another control. Without either control, Plan fails while Build may proceed without explicit mode selection.
 
-The live tool-result fingerprint hashes the owner, raw tools, tool choice, workspace, model and execution mode. Mode changes between completed turns use the same runtime. A changed effective tool catalog updates the MCP publication and reloads the same Cursor session to reconnect it; a failed refresh creates a new session from the supplied context. Native approvals are revoked while idle and re-established for the next turn's mode.
+The live tool-result fingerprint hashes the owner, raw tools, tool choice, workspace, model and execution mode. Missing or null tool choice is equivalent to `auto`; other choices remain distinct. Mode changes between completed turns use the same runtime. A changed effective tool catalog updates the MCP publication and reloads the same Cursor session to reconnect it; a failed refresh creates a new session from the supplied context. Native approvals are revoked while idle and re-established for the next turn's mode.
 
 ## Event ordering and cancellation
 
@@ -224,20 +226,30 @@ The proxy neither invents model prices nor forces `usage.cost` to zero. OpenCode
 
 Text and reasoning chunks retain receive order. JSON requests aggregate them; streaming requests emit SSE deltas followed by one completion boundary.
 
+Successful chat replies have a generated `id`, shared by all JSON chunks of a streaming reply.
+
 An error before the first output can become an HTTP error. After an SSE response starts, errors are returned inside the stream. Generation cancellation or timeout does not automatically replay the task; restoration fallback happens before prompting and remains within the original deadline. Unsupported blocking Cursor interactions are skipped or rejected.
 
 ## Logging
 
-Logs are written to stderr without module targets or ANSI color. The default filter is `info,rmcp=warn`; an explicit `RUST_LOG` replaces it. Release builds cap the proxy's tracing calls at INFO, so its DEBUG/TRACE events require a build without that cap.
+Logs are written to stderr as flat event and session fields, without module targets, span wrappers or ANSI color. The default filter is `info,rmcp=warn`; an explicit `RUST_LOG` replaces it. Debug builds support `RUST_LOG=info,cursor_proxy=debug,rmcp=warn` for proxy diagnostics. Release builds compile out DEBUG/TRACE events, omit diagnostic preview code and retain stripped symbols with no debug information.
+
+CI builds the Debug profile when `release` is unchecked, including push and pull-request builds, and uploads the raw binary for GitHub Artifacts to package once. Selecting `release` builds the Release profile and creates a ZIP (Windows) or tar.gz (macOS/Linux); publication additionally requires a manual run on `main`.
 
 | Event | Meaning |
 | --- | --- |
 | `listen` | Startup address, workspace, agent path, auth-enabled flag, configuration path and format |
-| `models` | Catalog `count` and `ms`; `config="updated"` only when configuration changed |
+| `models` | One line per refresh: `result="pass"` with `count` and `ms`; `config="updated"` only when configuration changed. Failures use WARN with `result`, `error` and `ms`. |
 | `request` / `reply` | Start and end of an HTTP completion; successful replies use INFO |
 | `new` / `load` | Cursor session creation or successful restoration |
 
-Fields: `req` (proxy HTTP completion ID), `oc` (OpenCode session ID), `cursor` (Cursor session ID), `model` and `ms` (elapsed milliseconds). IDs are not truncated. Anonymous requests use `oc="-"`; unknown Cursor IDs are omitted. `req` does not route sessions. Failed replies use WARN with `code` and an escaped `error` string. No prompt, tool-argument, tool-result or credential fields are logged.
+Fields: `oc` (OpenCode session ID), `cursor` (Cursor session ID), `model` and `ms` (elapsed milliseconds). IDs are not truncated. Anonymous requests use `oc="-"`; unknown Cursor IDs are omitted. Failed replies use WARN with `code` and an escaped `error` string. No prompt, tool-argument, tool-result or credential fields are logged.
+
+Failed model refreshes use `result="no-agent"` when the CLI entry is unavailable or cannot be started, `"auth"` when stderr is classified as authentication-related, `"catalog"` when successful CLI output contains no recognized models, and `"error"` for other failures. Failures retain the previous catalog. `pass` means the catalog refresh succeeded, not a separate authentication check.
+
+DEBUG records build/platform/terminal identity, working directory, CLI requests, Windows lookup candidates (up to 32), the selected launcher/script, child PID and spawn errors. OpenCode version detection and model discovery record their invoked program, arguments, captured output and exit status. Model diagnostics include configuration paths, a bounded PATH preview, PATHEXT, ComSpec and color settings. `api_key_present` records only whether the parent has `CURSOR_API_KEY`; `api_key_removed` records its exclusion from the child, never its value.
+
+Captured streams report their byte count, UTF-8 validity and escaped previews. Model streams also report ESC/NUL presence and parsed model counts. Previews retain at most 4 KiB: longer output uses the first and last 2 KiB with an omission marker. Common credential markers suppress the preview as `<redacted:credentials>`. Authentication classification records the matched static hint, not a confirmed server response. Review diagnostic logs before sharing them. Diagnostic logging itself does not change command execution or parsing.
 
 Each warm or tool-result attachment replaces the actor's log context with the incoming request's span. The resulting Cursor ID is recorded after selection or successful result delivery; fallback warnings name the attempted ID, while `new` and the final reply use the replacement ID. Request spans use ERROR level to retain IDs under warning-only filters; they emit no event.
 
@@ -245,9 +257,11 @@ Each warm or tool-result attachment replaces the actor's log context with the in
 
 The model catalog is discovered through the CLI on startup and every hour. HTTP model requests only read the cache. Configuration publication precedes cache replacement; refresh failures retain the previous catalog and configuration.
 
+The shared Cursor command entry removes `FORCE_COLOR` and sets `NO_COLOR=1` for every Cursor child, including model discovery and ACP sessions. This prevents inherited terminal styling from contaminating catalog text or protocol output. The parent environment and OpenCode command environment remain unchanged. Protocol payloads, reply text and host tool results are not stripped of ANSI characters. DEBUG distinguishes the parent color settings from the applied `cursor color policy`.
+
 ### OpenCode version and configuration format
 
-At startup the proxy invokes the OpenCode CLI found through `PATH` with `--version`. Parsed `1.x` versions use V1, and `2.x` uses V2, including prerelease/build suffixes. The probe has a two-second deadline and an 8 KiB limit on each output stream. Missing, failed, oversized, unrecognized or unsupported version output produces a warning and retains the V2 default. No version flag is exposed. Windows uses native executables or PowerShell launchers; npm `.cmd` launchers require their sibling `.ps1` file, without shell command interpolation.
+At startup the proxy invokes the OpenCode CLI found through `PATH` with `--version` and waits for it to exit without a timeout. Parsed `1.x` versions use V1, and `2.x` uses V2, including prerelease/build suffixes. Each output stream is limited to 8 KiB. A missing or failed command, oversized output, or an unrecognized or unsupported version stops startup with an error; no configuration is published. No version flag is exposed. Windows uses native executables or PowerShell launchers; npm `.cmd` launchers require their sibling `.ps1` file, without shell command interpolation.
 
 One immutable format selection is shared by model-catalog and context-capacity publication for the proxy lifetime.
 

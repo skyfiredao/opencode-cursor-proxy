@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
 import struct
 import tarfile
 import zipfile
@@ -60,32 +61,39 @@ def inspect_binary(binary, target):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Package one explicitly targeted Release binary without running it."
+        description="Prepare one targeted binary; optionally create a Release archive."
     )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--target", choices=TARGETS, required=True)
     parser.add_argument("--output", type=Path, default=Path("dist"))
+    parser.add_argument("--archive", action="store_true", help="Create a Release archive")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     inspect_binary(binary, args.target)
     platform, executable, suffix = TARGETS[args.target]
     args.output.mkdir(parents=True, exist_ok=True)
-    archive_path = args.output / f"cursor-proxy-{platform}{suffix}"
-    if suffix == ".zip":
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-            archive.write(binary, arcname=executable)
-    else:
-        with tarfile.open(archive_path, "w:gz", compresslevel=9) as archive:
-            info = archive.gettarinfo(str(binary), arcname=executable)
-            info.mode = 0o755
-            with binary.open("rb") as source:
-                archive.addfile(info, source)
     result = {
         "target": args.target,
-        "archive": archive_path.name,
         "binary_bytes": binary.stat().st_size,
-        "archive_bytes": archive_path.stat().st_size,
     }
+    if args.archive:
+        archive_path = args.output / f"cursor-proxy-{platform}{suffix}"
+        if suffix == ".zip":
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+                archive.write(binary, arcname=executable)
+        else:
+            with tarfile.open(archive_path, "w:gz", compresslevel=9) as archive:
+                info = archive.gettarinfo(str(binary), arcname=executable)
+                info.mode = 0o755
+                with binary.open("rb") as source:
+                    archive.addfile(info, source)
+        result.update(archive=archive_path.name, archive_bytes=archive_path.stat().st_size)
+    else:
+        output = args.output / executable
+        shutil.copy2(binary, output)
+        if executable != "cursor-proxy.exe":
+            output.chmod(0o755)
+        result["binary"] = output.name
     print(json.dumps(result, indent=2))
 
 

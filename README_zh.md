@@ -26,6 +26,8 @@
 
 支持 Windows amd64、macOS arm64（macOS 14 及以上）、Linux arm64 和 amd64。
 
+GitHub Actions 的 Debug 产物 ZIP 内直接包含可执行文件，不再嵌套压缩包。macOS/Linux 解压后运行 `chmod +x ./cursor-proxy`。
+
 macOS 若提示 Apple 无法验证该文件是否包含恶意软件，请先确认文件来源可信，再移除该文件的下载隔离标记。在可执行文件所在目录运行：
 
 ```bash
@@ -63,7 +65,7 @@ Windows PowerShell：
 
 代理启动时获取模型列表，此后每小时刷新一次。刷新失败时保留上次结果，列表未变化时不重写配置。
 
-支持 OpenCode V1 和 V2。请将要使用的 `opencode` 命令放在 `PATH` 中，以便自动配置。版本识别失败时使用 V2 格式。切换 OpenCode 安装后需重启代理。
+支持 OpenCode V1 和 V2。请将要使用的 `opencode` 命令放在 `PATH` 中，以便自动配置。版本识别失败时代理报错退出。切换 OpenCode 安装后需重启代理。
 
 V1 的上下文限制为 `0` 时表示未知；已有的正数上下文限制和显式输出限制保持不变。
 
@@ -86,6 +88,8 @@ V1 的上下文限制为 `0` 时表示未知；已有的正数上下文限制和
 ```
 
 Windows 使用 `.\cursor-proxy.exe --help`。
+
+`--version` 显示 `0.2.N+<SHA 前 7 位>`，`N` 为引入 `0.2` 版本系列后影响 `cursor-proxy/` 的提交数。同一提交重复构建不递增。
 
 | 参数 | 用途 | 默认值 |
 | --- | --- | --- |
