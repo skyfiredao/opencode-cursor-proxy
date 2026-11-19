@@ -19,9 +19,57 @@ pub(super) struct Runtime {
     pub host_calls: mpsc::Receiver<HostCall>,
     pub session: String,
     pub barrier: Option<(&'static str, Value)>,
+    pub context_window: Option<u64>,
     calls: mpsc::Sender<HostCall>,
     metadata: Value,
     catalog: String,
+}
+
+fn context_size(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let (number, scale) = match value.as_bytes().last()? {
+        b'k' | b'K' => (&value[..value.len() - 1], 1_000u64),
+        b'm' | b'M' => (&value[..value.len() - 1], 1_000_000u64),
+        _ => (value, 1u64),
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let mut size = whole.parse::<u64>().ok()?.checked_mul(scale)?;
+    if !fraction.is_empty() {
+        let divisor = 10u64.checked_pow(fraction.len().try_into().ok()?)?;
+        let numerator = fraction.parse::<u64>().ok()?.checked_mul(scale)?;
+        if numerator % divisor != 0 {
+            return None;
+        }
+        size = size.checked_add(numerator / divisor)?;
+    }
+    (size > 0).then_some(size)
+}
+
+fn maximum_context(metadata: &Value) -> Result<Option<(&str, u64)>, ApiError> {
+    let Some(option) = metadata["configOptions"]
+        .as_array()
+        .and_then(|options| options.iter().find(|option| option["id"] == "context"))
+    else {
+        return Ok(None);
+    };
+    let maximum = (option["type"] == "select")
+        .then(|| option["options"].as_array())
+        .flatten()
+        .into_iter()
+        .flatten()
+        .flat_map(|option| {
+            option["options"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(std::slice::from_ref(option))
+        })
+        .filter_map(|option| {
+            let value = option["value"].as_str()?;
+            Some((value, context_size(value)?))
+        })
+        .max_by_key(|(_, size)| *size)
+        .ok_or_else(|| ApiError::upstream("Cursor ACP advertised no usable context capacity"))?;
+    Ok(Some(maximum))
 }
 
 fn control(
@@ -88,6 +136,7 @@ impl Runtime {
             host_calls,
             session: String::new(),
             barrier: None,
+            context_window: None,
             calls,
             metadata: Value::Null,
             catalog: String::new(),
@@ -133,7 +182,32 @@ impl Runtime {
             .await;
         self.barrier = control(&self.metadata, &self.session, request.execution_mode())?;
         if let Some((method, params)) = &self.barrier {
-            self.connection.call(method, params.clone()).await?;
+            let response = self.connection.call(method, params.clone()).await?;
+            if response["configOptions"].is_array() {
+                self.metadata["configOptions"] = response["configOptions"].clone();
+            }
+        }
+        self.context_window = None;
+        if let Some((value, capacity)) = maximum_context(&self.metadata)? {
+            let response = self
+                .connection
+                .call(
+                    "session/set_config_option",
+                    json!({"sessionId":self.session,"configId":"context","value":value}),
+                )
+                .await?;
+            let accepted = response["configOptions"]
+                .as_array()
+                .and_then(|options| options.iter().find(|option| option["id"] == "context"))
+                .and_then(|option| option["currentValue"].as_str())
+                .and_then(context_size);
+            if accepted != Some(capacity) {
+                return Err(ApiError::upstream(
+                    "Cursor ACP did not accept the maximum context capacity",
+                ));
+            }
+            self.metadata["configOptions"] = response["configOptions"].clone();
+            self.context_window = Some(capacity);
         }
         // Loading replays history. The mode response is an ordered boundary before the next prompt.
         self.connection.take_pending()?;

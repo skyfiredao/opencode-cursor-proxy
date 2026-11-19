@@ -67,7 +67,7 @@ The proxy fetches models on startup and every hour afterward. Failed refreshes k
 
 OpenCode V1 and V2 are supported. Keep the intended `opencode` command on `PATH` for automatic configuration. If version detection fails, the proxy exits with an error. Restart the proxy after switching OpenCode installations.
 
-In V1, a context limit of `0` means unknown. Existing positive context limits and explicit output limits are preserved.
+Before each user turn, the proxy selects the largest context capacity advertised by Cursor and verifies that Cursor accepted it. This capacity replaces an old OpenCode context limit; explicit output limits remain unchanged. If Cursor does not advertise context choices, the existing observation fallback remains in use. In V1, a context limit of `0` means unknown.
 
 Synchronization preserves comments, other providers, the default model, and existing model customizations. It does not delete old models. Existing files receive a `.cursor-proxy-*.bak` backup before changes.
 

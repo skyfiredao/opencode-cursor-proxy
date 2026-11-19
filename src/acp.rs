@@ -343,7 +343,7 @@ impl Connection {
         let initialized = tokio::time::timeout(config.timeout, connection.call("initialize", json!({
             "protocolVersion":1,
             "clientInfo":{"name":"cursor-proxy","version":env!("CARGO_PKG_VERSION")},
-            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},
+            "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"_meta":{"parameterizedModelPicker":true}},
         }))).await.map_err(|_| ApiError::upstream("ACP initialization timed out"))??;
         if initialized["protocolVersion"] != 1 {
             return Err(ApiError::upstream(

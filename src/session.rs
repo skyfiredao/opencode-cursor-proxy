@@ -306,7 +306,7 @@ impl SessionStore {
                                 tokio::select! {
                                         _ = shutdown.changed() => return Err(ApiError::upstream("Proxy is shutting down")),
                                         _ = output.closed() => return Err(ApiError::upstream("Client disconnected")),
-                                        _ = usage::publish_capacity(self.version, path, model.clone(), capacity) => (),
+                                        _ = usage::publish_capacity(self.version, path, model.clone(), capacity, false) => (),
                                 }
                             }
                             output.send(Update::Done(usage)).await.map_err(|_| ApiError::upstream("Client disconnected"))?;
@@ -622,6 +622,12 @@ impl SessionStore {
         Ok(())
     }
 
+    async fn publish_context(&self, runtime: &Runtime, model: String) {
+        if let (Some(capacity), Some(path)) = (runtime.context_window, self.configuration.clone()) {
+            usage::publish_capacity(self.version, path, model, capacity, true).await;
+        }
+    }
+
     async fn run(
         self: &Arc<Self>,
         config: AgentConfig,
@@ -656,6 +662,7 @@ impl SessionStore {
         );
         mapping.instructions_hash = instruction_hash(&request.messages);
         self.remember(&mut mapping, &request, None).await?;
+        self.publish_context(&runtime, request.model()).await;
         let mut activity = runtime.connection.tool_activity();
         let mut mcp_activity = runtime
             .bridge
@@ -724,6 +731,7 @@ impl SessionStore {
                             let prompt = new_prompt(&request, skip, &mapping.instructions_hash);
                             mapping.instructions_hash = instruction_hash(&request.messages);
                             self.remember(&mut mapping, &request, None).await?;
+                            self.publish_context(&runtime, request.model()).await;
                             activity = runtime.connection.tool_activity();
                             mcp_activity = runtime.bridge.as_ref().map_or(0, |bridge| bridge.tool_activity());
                             checkpoint_root = usage::baseline(&runtime.session).await;

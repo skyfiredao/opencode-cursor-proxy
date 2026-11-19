@@ -57,12 +57,17 @@ pub async fn publish_capacity(
     path: PathBuf,
     model: String,
     capacity: u64,
+    selected: bool,
 ) {
     let cancelled = tokio_util::sync::CancellationToken::new();
     let _guard = cancelled.clone().drop_guard();
     let task = tokio::task::spawn_blocking(move || {
-        crate::config::publish_context_limit_for(version, &path, &model, capacity, &cancelled)
-            .map_err(|error| error.to_string())
+        let publish = if selected {
+            crate::config::select_context_limit_for
+        } else {
+            crate::config::publish_context_limit_for
+        };
+        publish(version, &path, &model, capacity, &cancelled).map_err(|error| error.to_string())
     });
     match tokio::time::timeout(Duration::from_millis(100), task).await {
         Ok(Ok(Ok(_))) => (),

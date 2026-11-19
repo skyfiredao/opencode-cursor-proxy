@@ -33,6 +33,27 @@ pub fn publish_context_limit_for(
     capacity: u64,
     cancelled: &tokio_util::sync::CancellationToken,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    context_limit_for(version, path, model, capacity, cancelled, false)
+}
+
+pub fn select_context_limit_for(
+    version: crate::opencode::Version,
+    path: &Path,
+    model: &str,
+    capacity: u64,
+    cancelled: &tokio_util::sync::CancellationToken,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    context_limit_for(version, path, model, capacity, cancelled, true)
+}
+
+fn context_limit_for(
+    version: crate::opencode::Version,
+    path: &Path,
+    model: &str,
+    capacity: u64,
+    cancelled: &tokio_util::sync::CancellationToken,
+    selected: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let _publication = PUBLICATION
         .lock()
         .map_err(|_| "Configuration publication lock poisoned")?;
@@ -66,7 +87,10 @@ pub fn publish_context_limit_for(
     let context = definition.pointer("/limit/context");
     let unknown_v1 =
         version == crate::opencode::Version::V1 && context.and_then(Value::as_u64) == Some(0);
-    if !definition.is_object() || (context.is_some() && !unknown_v1) {
+    if !definition.is_object()
+        || context.and_then(Value::as_u64) == Some(capacity)
+        || (context.is_some() && !unknown_v1 && !selected)
+    {
         return Ok(false);
     }
     let mut limit = serde_json::json!({"context":capacity});
