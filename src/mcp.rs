@@ -37,7 +37,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub const SERVER_NAME: &str = "cursor_proxy";
+pub const SERVER_NAME: &str = "opencode";
 
 pub struct HostCall {
     pub call: ToolCall,

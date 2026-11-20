@@ -114,7 +114,7 @@ fn new_prompt(request: &ChatRequest, skip: usize, previous_instructions: &str) -
         render_history(&messages)
     };
     if !request.tools.is_empty() {
-        text.push_str("\nUse the cursor_proxy MCP server for client-provided tools, including command execution when available. OpenCode checks their permissions in both Plan and Build modes.");
+        text.push_str("\nUse opencode-provided tools via the opencode MCP server. opencode checks their permissions in both Plan and Build modes.");
     }
     text
 }
